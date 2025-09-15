@@ -40,7 +40,12 @@ files = glob.glob(ppath)
 async def Lucy_start():
     print('\n')
     print('\nInitalizing Lucy')
-    await Codeflix.start()
+    try:
+        await Codeflix.start()
+    except FloodWait as e:
+        print(f"FloodWait: sleeping for {e.value} seconds")
+        await asyncio.sleep(e.value)
+        await Codeflix.start()
     bot_info = await Codeflix.get_me()
     Codeflix.username = bot_info.username
     await initialize_clients()
