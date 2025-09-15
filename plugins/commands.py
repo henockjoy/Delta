@@ -727,7 +727,7 @@ async def delete(bot, message):
         return
     
     file_id, file_ref = unpack_new_file_id(media.file_id)
-    await Media.count_documents({'file_id': file_id}):
+    if await Media.count_documents({'file_id': file_id}):
         result = await Media.collection.delete_one({
             '_id': file_id,
         })
