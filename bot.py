@@ -4,6 +4,7 @@ import importlib
 from pathlib import Path
 from pyrogram import Client, idle, __version__
 from pyrogram.raw.all import layer
+from pyrogram.errors import FloodWait
 import logging
 import logging.config
 import time
