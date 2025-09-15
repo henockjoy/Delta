@@ -24,11 +24,6 @@ client = AsyncIOMotorClient(DATABASE_URI)
 db = client[DATABASE_NAME]
 instance = Instance.from_db(db)
 
-#secondary db
-client2 = AsyncIOMotorClient(DATABASE_URI2)
-db2 = client2[DATABASE_NAME]
-instance2 = Instance.from_db(db2)
-
 
 # Primary DB Model
 @instance.register
@@ -45,66 +40,51 @@ class Media(Document):
         indexes = ('$file_name', )
         collection_name = COLLECTION_NAME
 
-@instance2.register
-class Media2(Document):
-    file_id = fields.StrField(attribute='_id')
-    file_ref = fields.StrField(allow_none=True)
-    file_name = fields.StrField(required=True)
-    file_size = fields.IntField(required=True)
-    file_type = fields.StrField(allow_none=True)
-    mime_type = fields.StrField(allow_none=True)
-    caption = fields.StrField(allow_none=True)
-
-    class Meta:
-        indexes = ('$file_name', )
-        collection_name = COLLECTION_NAME
-
 async def choose_mediaDB():
-    """This Function chooses which database to use based on the value of indexDB key in the dict tempDict."""
+    """Always use Media2 as the database."""
     global saveMedia
-    if tempDict['indexDB'] == DATABASE_URI:
-        logger.info("Using first db (Media)")
-        saveMedia = Media
-    else:
-        logger.info("Using second db (Media2)")
-        saveMedia = Media2
+    logger.info("Using second db (Media2)")
+    saveMedia = Media2
 
 async def save_file(bot, media):
-  """Save file in database"""
-  global saveMedia
-  file_id, file_ref = unpack_new_file_id(media.file_id)
-  file_name = re.sub(r"(_|\-|\.|\+)", " ", str(media.file_name))
-  try:
-    if saveMedia == Media2: 
-        if await Media.count_documents({'file_id': file_id}, limit=1):
-            logger.warning(f'{file_name} is already saved in primary database!')
-            return False, 0
-    file = saveMedia(
-        file_id=file_id,
-        file_ref=file_ref,
-        file_name=file_name,
-        file_size=media.file_size,
-        file_type=media.file_type,
-        mime_type=media.mime_type,
-        caption=media.caption.html if media.caption else None,
-    )
-  except ValidationError:
-    logger.exception('Error occurred while saving file in database')
-    return False, 2
-  else:
+    """Save file in Media database"""
+    file_id, file_ref = unpack_new_file_id(media.file_id)
+    file_name = re.sub(r"(_|\-|\.|\+)", " ", str(media.file_name))
+
     try:
-      await file.commit()
-    except DuplicateKeyError:
-      logger.warning(f'{getattr(media, "file_name", "NO_FILE")} is already saved in database')   
-      return False, 0
+        # Always check duplicates in Media
+        if await Media.count_documents({'file_id': file_id}, limit=1):
+            logger.warning(f'{file_name} is already saved in Media database!')
+            return False, 0
+
+        file = Media(
+            file_id=file_id,
+            file_ref=file_ref,
+            file_name=file_name,
+            file_size=media.file_size,
+            file_type=media.file_type,
+            mime_type=media.mime_type,
+            caption=media.caption.html if media.caption else None,
+        )
+
+    except ValidationError:
+        logger.exception('Error occurred while saving file in Media')
+        return False, 2
+
     else:
-        logger.info(f'{getattr(media, "file_name", "NO_FILE")} is saved to database')
-        if await get_status(bot.me.id):
-            await send_msg(bot, file.file_name, file.caption)
-        return True, 1
+        try:
+            await file.commit()
+        except DuplicateKeyError:
+            logger.warning(f'{getattr(media, "file_name", "NO_FILE")} is already saved in Media')   
+            return False, 0
+        else:
+            logger.info(f'{getattr(media, "file_name", "NO_FILE")} is saved to Media')
+            if await get_status(bot.me.id):
+                await send_msg(bot, file.file_name, file.caption)
+            return True, 1
 
 async def get_search_results(chat_id, query, file_type=None, max_results=10, offset=0, filter=False):
-    """For given query return (results, next_offset)"""
+    """For given query return (results, next_offset, total_results)"""
     if chat_id is not None:
         settings = await get_settings(int(chat_id))
         try:
@@ -119,6 +99,7 @@ async def get_search_results(chat_id, query, file_type=None, max_results=10, off
                 max_results = 10
             else:
                 max_results = int(MAX_B_TN)
+
     query = query.strip()
     if not query:
         raw_pattern = '.'
@@ -140,39 +121,28 @@ async def get_search_results(chat_id, query, file_type=None, max_results=10, off
     if file_type:
         filter['file_type'] = file_type
 
-    total_results = ((await Media.count_documents(filter))+(await Media2.count_documents(filter)))
+    total_results = await Media.count_documents(filter)
 
-    #verifies max_results is an even number or not
-    if max_results%2 != 0: 
+    # verifies max_results is an even number or not
+    if max_results % 2 != 0: 
         logger.info(f"Since max_results is an odd number ({max_results}), bot will use {max_results+1} as max_results to make it even.")
         max_results += 1
 
     cursor = Media.find(filter)
-    cursor2 = Media2.find(filter)
-
     cursor.sort('$natural', -1)
-    cursor2.sort('$natural', -1)
+    cursor.skip(offset).limit(max_results)
 
-    cursor2.skip(offset).limit(max_results)
+    files = await cursor.to_list(length=max_results)
+    next_offset = offset + len(files)
 
-    fileList2 = await cursor2.to_list(length=max_results)
-    if len(fileList2)<max_results:
-        next_offset = offset+len(fileList2)
-        cursorSkipper = (next_offset-(await Media2.count_documents(filter)))
-        cursor.skip(cursorSkipper if cursorSkipper>=0 else 0).limit(max_results-len(fileList2))
-        fileList1 = await cursor.to_list(length=(max_results-len(fileList2)))
-        files = fileList2+fileList1
-        next_offset = next_offset + len(fileList1)
-    else:
-        files = fileList2
-        next_offset = offset + max_results
     if next_offset >= total_results:
         next_offset = ''
+
     return files, next_offset, total_results
 
 
 async def get_bad_files(query, file_type=None, filter=False):
-    """For given query return (results, next_offset)"""
+    """For given query return (results, total_results)"""
     query = query.strip()
     if not query:
         raw_pattern = '.'
@@ -195,13 +165,9 @@ async def get_bad_files(query, file_type=None, filter=False):
         filter['file_type'] = file_type
 
     cursor = Media.find(filter)
-    cursor2 = Media2.find(filter)
-
     cursor.sort('$natural', -1)
-    cursor2.sort('$natural', -1)
 
-    files = ((await cursor2.to_list(length=(await Media2.count_documents(filter))))+(await cursor.to_list(length=(await Media.count_documents(filter)))))
-
+    files = await cursor.to_list(length=(await Media.count_documents(filter)))
     total_results = len(files)
 
     return files, total_results
@@ -210,9 +176,6 @@ async def get_file_details(query):
     filter = {'file_id': query}
     cursor = Media.find(filter)
     filedetails = await cursor.to_list(length=1)
-    if not filedetails:
-        cursor2 = Media2.find(filter)
-        filedetails = await cursor2.to_list(length=1)
     return filedetails
 
 
@@ -250,67 +213,72 @@ def unpack_new_file_id(new_file_id):
     file_ref = encode_file_ref(decoded.file_reference)
     return file_id, file_ref
 
+def normalize_name(filename: str, is_series: bool = False) -> str:
+    """Extract a clean base name for deduplication (movie vs tvseries)."""
+    # Replace dots/underscores with spaces
+    clean = re.sub(r"[._]", " ", filename)
+    clean = re.sub(r"\s+", " ", clean).strip()
+
+    if is_series:
+        # Capture Season/Episode (S01E03 or Season 1 Episode 3)
+        match = re.search(r"(.*?)(S?\d{1,2}E\d{1,2})", clean, re.IGNORECASE)
+        if match:
+            return f"{match.group(1).strip()} {match.group(2).upper()}"
+    
+    # Movie case: Title + Year
+    match = re.search(r"^(.*?)(\s*\(?\d{4}\)?)", clean)
+    if match:
+        return (match.group(1).strip() + " " + match.group(2).strip()).strip()
+
+    return clean
+
 
 async def send_msg(bot, filename, caption): 
     try:
+        # Clean inputs
         filename = re.sub(r'\(\@\S+\)|\[\@\S+\]|\b@\S+|\bwww\.\S+', '', filename).strip()
         caption = re.sub(r'\(\@\S+\)|\[\@\S+\]|\b@\S+|\bwww\.\S+', '', caption).strip()
-        
-        year_match = re.search(r"\b(19|20)\d{2}\b", caption)
-        year = year_match.group(0) if year_match else None
 
-        pattern = r"(?i)(?:s|season)0*(\d{1,2})"
-        season = re.search(pattern, caption) or re.search(pattern, filename)
-        season = season.group(1) if season else None 
+        # ✅ Fetch IMDb details
+        imdb = await get_movie_details(filename)  
+        genre = ", ".join(imdb.get("genre", [])) if imdb and isinstance(imdb.get("genre"), list) else imdb.get("genre", "Unknown")
+        imdb_type = imdb.get("type", "movie").lower() if imdb else "movie"
 
-        if year:
-            filename = filename[: filename.find(year) + 4]  
-        elif season and season in filename:
-            filename = filename[: filename.find(season) + 1]
+        # ✅ Hashtag
+        if imdb_type in ["tv", "tvseries", "series", "show"]:
+            hashtag = "#TVSERIES"
+            is_series = True
+        else:
+            hashtag = "#𝖬𝖮𝖵𝖨𝖤"
+            is_series = False
 
-        qualities = ["ORG", "org", "hdcam", "HDCAM", "HQ", "hq", "HDRip", "hdrip", "camrip", "CAMRip", "hdtc", "predvd", "DVDscr", "dvdscr", "dvdrip", "dvdscr", "HDTC", "dvdscreen", "HDTS", "hdts"]
-        quality = await get_qualities(caption.lower(), qualities) or "HDRip"
+        # ✅ Normalize filename (movie vs series)
+        base_name = normalize_name(filename, is_series)
 
-        language = ""
-        possible_languages = CAPTION_LANGUAGES
-        for lang in possible_languages:
-            if lang.lower() in caption.lower():
-                language += f"{lang}, "
-        language = language[:-2] if language else "Not idea 😄"
+        # ✅ Prevent duplicates
+        if not await add_name(OWNERID, base_name):
+            return  # already sent once
 
-        filename = re.sub(r"[\(\)\[\]\{\}:;'\-!]", "", filename)
+        # ✅ Extract audio from caption (avoid duplicates)
+        languages = []
+        for lang in CAPTION_LANGUAGES:
+            if lang.lower() in caption.lower() and lang not in languages:
+                languages.append(lang)
+        language = ", ".join(languages) if languages else "Unknown"
 
-        text = "#𝑵𝒆𝒘_𝑭𝒊𝒍𝒆_𝑨𝒅𝒅𝒆𝒅 ✅\n\n👷𝑵𝒂𝒎𝒆: `{}`\n\n🌳𝑸𝒖𝒂𝒍𝒊𝒕𝒚: {}\n\n🍁𝑨𝒖𝒅𝒊𝒐: {}"
-        text = text.format(filename, quality, language)
+        # ✅ Final text
+        text = (
+            f"<b>✅ {base_name} {hashtag}</b>\n\n"
+            f"<blockquote>🍁 Audio: {language}</blockquote>\n\n"
+            f"<b>🎬 Genre:</b> {genre}\n"
+        )
 
-        if await add_name(OWNERID, filename):
-            imdb = await get_movie_details(filename)  
-            resized_poster = None
+        # ✅ Send clean entry (no poster, no duplication)
+        btn = [[InlineKeyboardButton('📁 𝖢𝗅𝗂𝖼𝗄 𝗍𝗈 𝖲𝖾𝖺𝗋𝖼𝗁', url=f"https://telegram.me/{temp.U_NAME}?start=getfile-{base_name.replace(' ', '-')}")]]
+        await bot.send_message(chat_id=MOVIE_UPDATE_CHANNEL, text=text, reply_markup=InlineKeyboardMarkup(btn))
 
-            if imdb:
-                poster_url = imdb.get('poster_url')
-                if poster_url:
-                    resized_poster = await fetch_image(poster_url)  
-
-            filenames = filename.replace(" ", '-')
-            btn = [[InlineKeyboardButton('🌲 Get Files 🌲', url=f"https://telegram.me/{temp.U_NAME}?start=getfile-{filenames}")]]
-            
-            if resized_poster:
-                await bot.send_photo(chat_id=MOVIE_UPDATE_CHANNEL, photo=resized_poster, caption=text, reply_markup=InlineKeyboardMarkup(btn))
-            else:              
-                await bot.send_message(chat_id=MOVIE_UPDATE_CHANNEL, text=text, reply_markup=InlineKeyboardMarkup(btn))
-
-    except:
-        pass
-
-async def get_qualities(text, qualities: list):
-    """Get all Quality from text"""
-    quality = []
-    for q in qualities:
-        if q in text:
-            quality.append(q)
-    quality = ", ".join(quality)
-    return quality[:-2] if quality.endswith(", ") else quality
+    except Exception as e:
+        print(f"Error in send_msg: {e}")
 
 
 
