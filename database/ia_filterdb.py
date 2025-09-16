@@ -222,15 +222,14 @@ def unpack_new_file_id(new_file_id):
 # ------------------------------
 def remove_noise_tags(filename: str) -> str:
     noise_patterns = [
-        r"\bHQ\b", r"\bHDRip\b", r"\bWEBRip\b", r"\bWEB-DL\b", r"\bBluRay\b",
+        r"\bHQ\b", r"\bHDRip\b", r"\bWEBRip\b", r"\bWEB-DL\b", r"\bWEB-HD\b", r"\bBluRay\b",
         r"\b10bit\b", r"\bDDP?5\.1\b", r"\bAAC\b", r"\bATMOS\b", r"\bx264\b",
         r"\bx265\b", r"\bHEVC\b", r"\bESub\b", r"\bMULTi\b", r"\bDS4K\b",
-        r"\b[0-9]{3,4}p\b", r"\bJHS\b", r"\bMRiPS\b"
+        r"\b[0-9]{3,4}p\b", r"\bJHS\b", r"\bMRiPS\b", r"\bPahe\.in\b"
     ]
     name = filename
     for pattern in noise_patterns:
         name = re.sub(pattern, "", name, flags=re.IGNORECASE)
-    # Replace multiple spaces or dots/underscores with single space
     name = re.sub(r"[._]+", " ", name)
     return name.strip()
 
@@ -238,7 +237,6 @@ def remove_noise_tags(filename: str) -> str:
 # Title Cleaning Functions
 # ------------------------------
 def clean_title(filename: str, is_series: bool = False) -> str:
-    """Returns cleaned movie or series title with year for movies."""
     name = remove_noise_tags(filename)
 
     if is_series:
@@ -258,15 +256,14 @@ def clean_title(filename: str, is_series: bool = False) -> str:
     return name.strip()
 
 def clean_button_link(filename: str) -> str:
-    """Returns cleaned title for inline button with spaces replaced by '-'."""
     name = remove_noise_tags(filename)
-    # For series: Title-S01
+    # Series button link: Title-S01
     match = re.match(r"(.+?)\s*[Ss](\d{1,2})", name)
     if match:
         title = match.group(1).strip().replace(" ", "-")
         season = match.group(2).zfill(2)
         return f"{title}-S{season}"
-    # For movies: Title-Year
+    # Movie button link: Title-Year
     match = re.match(r"(.+?)\s*\(?(\d{4})\)?", name)
     if match:
         title = match.group(1).strip().replace(" ", "-")
@@ -279,20 +276,18 @@ def clean_button_link(filename: str) -> str:
 # ------------------------------
 async def send_msg(bot, filename, caption, is_series=False):
     try:
-        # ✅ Clean caption title
+        # ✅ Cleaned title
         clean_caption_title = clean_title(filename, is_series)
-        # ✅ Button link base
         button_base = clean_button_link(filename)
 
-        # ✅ Detect type
         tag = "#𝚃𝚅𝚂𝙴𝚁𝙸𝙴𝚂" if is_series else "#𝙼𝙾𝚅𝙸𝙴"
 
-        # ✅ Avoid duplicates
-        if not await add_name(OWNERID, filename):
-            return  
+        # ✅ Avoid duplicates (episode-level for series, movie-level for films)
+        if not await add_name(OWNERID, clean_caption_title):
+            return
 
-        # ✅ IMDb details
-        imdb = await get_movie_details(filename)
+        # ✅ IMDb details using cleaned title
+        imdb = await get_movie_details(clean_caption_title)
         genre = "Unknown"
         resized_poster = None
         if imdb:
@@ -309,24 +304,15 @@ async def send_msg(bot, filename, caption, is_series=False):
                     if img.width > img.height:  # landscape only
                         resized_poster = img_bytes
 
-        # ------------------------------
-        # Auto-detect language (robust)
-        # ------------------------------
+        # ✅ Auto-detect languages
         detected_langs = []
         for lang in CAPTION_LANGUAGES:
             if re.search(rf"\b{re.escape(lang.lower())}\b", caption.lower()) or \
                re.search(rf"\b{re.escape(lang.lower())}\b", filename.lower()):
                 detected_langs.append(lang)
 
-        # Remove duplicates while keeping order
         seen = set()
-        unique_langs = []
-        for l in detected_langs:
-            if l not in seen:
-                unique_langs.append(l)
-                seen.add(l)
-
-        # Join multiple languages with commas
+        unique_langs = [l for l in detected_langs if not (l in seen or seen.add(l))]
         language = ", ".join(unique_langs) if unique_langs else "Unknown"
 
         # ✅ Final caption
@@ -363,6 +349,7 @@ async def send_msg(bot, filename, caption, is_series=False):
 
     except Exception as e:
         print(f"❌ Error in send_msg: {e}")
+
         
 async def get_qualities(text, qualities: list):
     """Get all Quality from text"""
