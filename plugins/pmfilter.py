@@ -2180,7 +2180,7 @@ async def cb_handler(client: Client, query: CallbackQuery):
             InlineKeyboardButton('• sᴜᴘᴘᴏʀᴛ', callback_data='group_info'),
             InlineKeyboardButton('ᴄᴏᴍᴍᴀɴᴅs •', callback_data='main')
         ], [
-            InlineKeyboardButton('• ᴅᴇᴠᴇʟᴏᴘᴇʀ', user_id=int(6497757690)),
+            InlineKeyboardButton('• ᴅᴇᴠᴇʟᴏᴘᴇʀ', url="t.me/FTAdminbot"),
             InlineKeyboardButton('ɴᴇᴛᴡᴏʀᴋ •', url="t.me/FT_Channels")
         ], [
             InlineKeyboardButton('• ʙᴀᴄᴋ •', callback_data='start')
