@@ -282,14 +282,27 @@ async def send_msg(bot, filename, caption, is_series=False):
         if not await add_name(OWNERID, clean_caption_title):
             return
 
-        # IMDb genre
+        # IMDb genre (robust version)
         imdb = await get_movie_details(clean_caption_title)
         genre = "Unknown"
         if imdb:
-            if isinstance(imdb.get("genre"), list):
-                genre = ", ".join(imdb["genre"])
-            elif isinstance(imdb.get("genre"), str):
-                genre = imdb["genre"]
+            # Check multiple possible keys
+            if "genre" in imdb:
+                if isinstance(imdb["genre"], list):
+                    genre = ", ".join(imdb["genre"])
+                else:
+                    genre = str(imdb["genre"])
+            elif "genres" in imdb:
+                if isinstance(imdb["genres"], list):
+                    genre = ", ".join(imdb["genres"])
+                else:
+                    genre = str(imdb["genres"])
+            elif "Genre" in imdb:
+                if isinstance(imdb["Genre"], list):
+                    genre = ", ".join(imdb["Genre"])
+                else:
+                    genre = str(imdb["Genre"])
+
 
         # Detect languages
         detected_langs = []
