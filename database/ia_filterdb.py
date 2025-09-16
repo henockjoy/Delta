@@ -41,10 +41,10 @@ class Media(Document):
         collection_name = COLLECTION_NAME
 
 async def choose_mediaDB():
-    """Always use Media2 as the database."""
+    """Always use Media as the database."""
     global saveMedia
-    logger.info("Using second db (Media2)")
-    saveMedia = Media2
+    logger.info("Using primary db (Media)")
+    saveMedia = Media
 
 async def save_file(bot, media):
     """Save file in Media database"""
