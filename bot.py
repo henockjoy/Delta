@@ -40,7 +40,7 @@ logging.getLogger("aiohttp.web").setLevel(logging.ERROR)
 botStartTime = time.time()
 ppath = "plugins/*.py"
 files = glob.glob(ppath)
-
+KEEP_ALIVE_URL = environ.get("KEEP_ALIVE_URL", "https://combative-zonda-filmotainment-21dd03cd.koyeb.app/")
 async def keep_alive():
     """Send a request every 111 seconds to keep the bot alive (if required)."""
     async with aiohttp.ClientSession() as session:
