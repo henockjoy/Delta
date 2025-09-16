@@ -41,30 +41,6 @@ botStartTime = time.time()
 ppath = "plugins/*.py"
 files = glob.glob(ppath)
 
-KEEP_ALIVE_URL = os.environ.get("KEEP_ALIVE_URL", "https://combative-zonda-filmotainment-21dd03cd.koyeb.app/")
-
-async def keep_alive():
-    """Send a request every 111 seconds to keep the bot alive (if required)."""
-    async with aiohttp.ClientSession() as session:
-        while True:
-            try:
-                async with session.get(KEEP_ALIVE_URL) as resp:
-                    logging.info(f"Keep-alive request sent (status {resp.status}).")
-            except Exception as e:
-                logging.error(f"Keep-alive request failed: {e}")
-            await asyncio.sleep(111)
-
-async def kulasthree(self):
-    """Restart the bot every 24 hours."""
-    while True:
-        await asyncio.sleep(24 * 60 * 60)  # wait 24 hours
-        logging.info("🔄 Bot is restarting")
-        try:
-            await self.send_message(chat_id=LOG_CHANNEL, text="🔄 Bot is restarting ...")
-        except Exception as e:
-            logging.error(f"Failed to send restart message: {e}")
-        os.execl(sys.executable, sys.executable, *sys.argv)
-
 async def Lucy_start():
     print('\n')
     print('\nInitalizing Yoon')
