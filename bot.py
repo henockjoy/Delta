@@ -65,7 +65,7 @@ async def kulasthree(self):
 
 async def Lucy_start():
     print('\n')
-    print('\nInitalizing Lucy')
+    print('\nInitalizing Yoon')
     try:
         await Codeflix.start()
     except FloodWait as e:
