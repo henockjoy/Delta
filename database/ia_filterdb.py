@@ -2,6 +2,8 @@ import logging
 from struct import pack
 import re
 import base64
+import io
+import aiohttp
 from pyrogram.file_id import FileId
 from pymongo.errors import DuplicateKeyError
 from umongo import Instance, Document, fields
@@ -12,6 +14,7 @@ from utils import get_settings, save_group_settings, temp, get_status
 from database.users_chats_db import add_name
 from .Imdbposter import get_movie_details, fetch_image
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from PIL import Image
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -213,72 +216,106 @@ def unpack_new_file_id(new_file_id):
     file_ref = encode_file_ref(decoded.file_reference)
     return file_id, file_ref
 
-def normalize_name(filename: str, is_series: bool = False) -> str:
-    """Extract a clean base name for deduplication (movie vs tvseries)."""
-    # Replace dots/underscores with spaces
-    clean = re.sub(r"[._]", " ", filename)
-    clean = re.sub(r"\s+", " ", clean).strip()
-
-    if is_series:
-        # Capture Season/Episode (S01E03 or Season 1 Episode 3)
-        match = re.search(r"(.*?)(S?\d{1,2}E\d{1,2})", clean, re.IGNORECASE)
-        if match:
-            return f"{match.group(1).strip()} {match.group(2).upper()}"
-    
-    # Movie case: Title + Year
-    match = re.search(r"^(.*?)(\s*\(?\d{4}\)?)", clean)
-    if match:
-        return (match.group(1).strip() + " " + match.group(2).strip()).strip()
-
-    return clean
-
-
-async def send_msg(bot, filename, caption): 
+async def send_msg(bot, filename, caption):
     try:
-        # Clean inputs
+        # ✅ Clean inputs
         filename = re.sub(r'\(\@\S+\)|\[\@\S+\]|\b@\S+|\bwww\.\S+', '', filename).strip()
         caption = re.sub(r'\(\@\S+\)|\[\@\S+\]|\b@\S+|\bwww\.\S+', '', caption).strip()
+        
+        # ✅ Detect Year or Season
+        year_match = re.search(r"\b(19|20)\d{2}\b", caption)
+        year = year_match.group(0) if year_match else None
 
-        # ✅ Fetch IMDb details
-        imdb = await get_movie_details(filename)  
-        genre = ", ".join(imdb.get("genre", [])) if imdb and isinstance(imdb.get("genre"), list) else imdb.get("genre", "Unknown")
-        imdb_type = imdb.get("type", "movie").lower() if imdb else "movie"
+        pattern = r"(?i)(?:s|season)0*(\d{1,2})"
+        season_match = re.search(pattern, caption) or re.search(pattern, filename)
+        season = season_match.group(1) if season_match else None 
 
-        # ✅ Hashtag
-        if imdb_type in ["tv", "tvseries", "series", "show"]:
-            hashtag = "#TVSERIES"
-            is_series = True
-        else:
-            hashtag = "#𝖬𝖮𝖵𝖨𝖤"
-            is_series = False
+        # Cut filename to year/season if exists
+        if year:
+            filename = filename[: filename.find(year) + 4]  
+        elif season and season in filename:
+            filename = filename[: filename.find(season) + 1]
 
-        # ✅ Normalize filename (movie vs series)
-        base_name = normalize_name(filename, is_series)
-
-        # ✅ Prevent duplicates
-        if not await add_name(OWNERID, base_name):
-            return  # already sent once
-
-        # ✅ Extract audio from caption (avoid duplicates)
+        # ✅ Language detection
         languages = []
         for lang in CAPTION_LANGUAGES:
             if lang.lower() in caption.lower() and lang not in languages:
                 languages.append(lang)
         language = ", ".join(languages) if languages else "Unknown"
 
-        # ✅ Final text
+        # ✅ Clean filename
+        filename = re.sub(r"[\(\)\[\]\{\}:;'\-!]", "", filename)
+
+        # ✅ Prevent duplicates
+        if not await add_name(OWNERID, filename):
+            print(f"⏩ Skipped duplicate: {filename}")
+            return
+
+        # ✅ IMDb details
+        imdb = await get_movie_details(filename) or {}
+        poster_url = imdb.get('poster_url')
+
+        # ✅ Genre
+        genre = ", ".join(imdb.get("genre", [])) if isinstance(imdb.get("genre"), list) else imdb.get("genre", "Unknown")
+
+        # ✅ Movie vs Series
+        imdb_type = imdb.get("type", "movie").lower()
+        if imdb_type in ["tv", "tvseries", "series", "show"]:
+            hashtag = "#TVSERIES"
+            if season:  # Always append Season X
+                if f"Season {season}" not in filename:
+                    filename = f"{filename} Season {season}"
+        else:
+            hashtag = "#MOVIE"
+
+        # ✅ Final caption
         text = (
-            f"<b>✅ {base_name} {hashtag}</b>\n\n"
-            f"<blockquote>🍁 Audio: {language}</blockquote>\n\n"
-            f"<b>🎬 Genre:</b> {genre}\n"
+            f"<b>✅ {filename} {hashtag}</b>\n\n"
+            f"<blockquote><b>🎙 {language}</b></blockquote>\n\n"
+            f"<b>📽 Genre:</b> {genre}"
         )
 
-        # ✅ Send clean entry (no poster, no duplication)
-        btn = [[InlineKeyboardButton('📁 𝖢𝗅𝗂𝖼𝗄 𝗍𝗈 𝖲𝖾𝖺𝗋𝖼𝗁', url=f"https://telegram.me/{temp.U_NAME}?start=getfile-{base_name.replace(' ', '-')}")]]
-        await bot.send_message(chat_id=MOVIE_UPDATE_CHANNEL, text=text, reply_markup=InlineKeyboardMarkup(btn))
+        # ✅ Inline button
+        filenames = filename.replace(" ", '-')
+        btn = [[InlineKeyboardButton('🔍 Tap to Search', url=f"https://telegram.me/{temp.U_NAME}?start=getfile-{filenames}")]]
+        
+        # ✅ Poster check: only send if landscape
+        if poster_url:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(poster_url) as resp:
+                        if resp.status == 200:
+                            img_bytes = await resp.read()
+                            img = Image.open(io.BytesIO(img_bytes))
+                            if img.width > img.height:  # Only landscape
+                                await bot.send_photo(
+                                    chat_id=MOVIE_UPDATE_CHANNEL,
+                                    photo=img_bytes,
+                                    caption=text,
+                                    reply_markup=InlineKeyboardMarkup(btn)
+                                )
+                                return
+            except Exception as e:
+                print(f"⚠️ Poster fetch failed: {e}")
+
+        # ✅ Fallback (no poster or portrait)
+        await bot.send_message(
+            chat_id=MOVIE_UPDATE_CHANNEL,
+            text=text,
+            reply_markup=InlineKeyboardMarkup(btn)
+        )
 
     except Exception as e:
-        print(f"Error in send_msg: {e}")
+        print(f"❌ Error in send_msg: {e}")
+        
+async def get_qualities(text, qualities: list):
+    """Get all Quality from text"""
+    quality = []
+    for q in qualities:
+        if q in text:
+            quality.append(q)
+    quality = ", ".join(quality)
+    return quality[:-2] if quality.endswith(", ") else quality
 
 
 
