@@ -238,7 +238,6 @@ def remove_noise_tags(filename: str) -> str:
 # ------------------------------
 def clean_title(filename: str, is_series: bool = False) -> str:
     name = remove_noise_tags(filename)
-
     if is_series:
         match = re.match(r"(.+?)\s*[Ss](\d{1,2})[ ._-]?[Ee](\d{1,2})", name)
         if match:
@@ -252,18 +251,17 @@ def clean_title(filename: str, is_series: bool = False) -> str:
             title = match.group(1).strip()
             year = match.group(2)
             return f"{title} {year}"
-
     return name.strip()
 
 def clean_button_link(filename: str) -> str:
     name = remove_noise_tags(filename)
-    # Series button link: Title-S01
+    # Series: Title-S01
     match = re.match(r"(.+?)\s*[Ss](\d{1,2})", name)
     if match:
         title = match.group(1).strip().replace(" ", "-")
         season = match.group(2).zfill(2)
         return f"{title}-S{season}"
-    # Movie button link: Title-Year
+    # Movie: Title-Year
     match = re.match(r"(.+?)\s*\(?(\d{4})\)?", name)
     if match:
         title = match.group(1).strip().replace(" ", "-")
@@ -272,39 +270,28 @@ def clean_button_link(filename: str) -> str:
     return name.split()[0].replace(" ", "-")
 
 # ------------------------------
-# Send Message Function
+# Send Message Function (No Poster)
 # ------------------------------
 async def send_msg(bot, filename, caption, is_series=False):
     try:
-        # ✅ Cleaned title
         clean_caption_title = clean_title(filename, is_series)
         button_base = clean_button_link(filename)
-
         tag = "#𝚃𝚅𝚂𝙴𝚁𝙸𝙴𝚂" if is_series else "#𝙼𝙾𝚅𝙸𝙴"
 
-        # ✅ Avoid duplicates (episode-level for series, movie-level for films)
+        # Duplicate check using cleaned title
         if not await add_name(OWNERID, clean_caption_title):
             return
 
-        # ✅ IMDb details using cleaned title
+        # IMDb genre
         imdb = await get_movie_details(clean_caption_title)
         genre = "Unknown"
-        resized_poster = None
         if imdb:
             if isinstance(imdb.get("genre"), list):
                 genre = ", ".join(imdb["genre"])
             elif isinstance(imdb.get("genre"), str):
                 genre = imdb["genre"]
 
-            poster_url = imdb.get("poster_url")
-            if poster_url:
-                img_bytes = await fetch_image(poster_url)
-                if img_bytes:
-                    img = Image.open(io.BytesIO(img_bytes))
-                    if img.width > img.height:  # landscape only
-                        resized_poster = img_bytes
-
-        # ✅ Auto-detect languages
+        # Detect languages
         detected_langs = []
         for lang in CAPTION_LANGUAGES:
             if re.search(rf"\b{re.escape(lang.lower())}\b", caption.lower()) or \
@@ -315,14 +302,14 @@ async def send_msg(bot, filename, caption, is_series=False):
         unique_langs = [l for l in detected_langs if not (l in seen or seen.add(l))]
         language = ", ".join(unique_langs) if unique_langs else "Unknown"
 
-        # ✅ Final caption
+        # Final caption
         final_caption = (
             f"<b>✅ {clean_caption_title} {tag}</b>\n\n"
             f"<blockquote><b>🎙 {language}</b></blockquote>\n\n"
             f"<b>📽 Genre:</b> {genre}"
         )
 
-        # ✅ Inline button
+        # Inline button
         btn = [[
             InlineKeyboardButton(
                 "🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑",
@@ -330,22 +317,13 @@ async def send_msg(bot, filename, caption, is_series=False):
             )
         ]]
 
-        # ✅ Send photo or message
-        if resized_poster:
-            await bot.send_photo(
-                chat_id=MOVIE_UPDATE_CHANNEL,
-                photo=resized_poster,
-                caption=final_caption,
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup(btn)
-            )
-        else:
-            await bot.send_message(
-                chat_id=MOVIE_UPDATE_CHANNEL,
-                text=final_caption,
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup(btn)
-            )
+        # Send message only (no poster)
+        await bot.send_message(
+            chat_id=MOVIE_UPDATE_CHANNEL,
+            text=final_caption,
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(btn)
+        )
 
     except Exception as e:
         print(f"❌ Error in send_msg: {e}")
