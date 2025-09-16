@@ -216,94 +216,133 @@ def unpack_new_file_id(new_file_id):
     file_ref = encode_file_ref(decoded.file_reference)
     return file_id, file_ref
 
-async def send_msg(bot, filename, caption):
+# ------------------------------
+# Title Cleaning Functions
+# ------------------------------
+def clean_title(filename: str, is_series: bool = False) -> str:
+    """Returns cleaned movie or series title with year for movies."""
+    name = re.sub(r"[._]+", " ", filename)
+
+    if is_series:
+        match = re.match(r"(.+?)\s*[Ss](\d{1,2})[ ._-]?[Ee](\d{1,2})", name)
+        if match:
+            title = match.group(1).strip()
+            season = match.group(2).zfill(2)
+            episode = match.group(3).zfill(2)
+            return f"{title} S{season}E{episode}"
+    else:
+        # Try to extract "Title (Year)" or "Title Year"
+        match = re.match(r"(.+?)\s*\(?(\d{4})\)?", name)
+        if match:
+            title = match.group(1).strip()
+            year = match.group(2)
+            return f"{title} {year}"
+
+    return name.strip()
+
+def clean_button_link(filename: str) -> str:
+    """Returns cleaned title for inline button with spaces replaced by '-'."""
+    name = re.sub(r"[._]+", " ", filename)
+    # For series: Title-S01
+    match = re.match(r"(.+?)\s*[Ss](\d{1,2})", name)
+    if match:
+        title = match.group(1).strip().replace(" ", "-")
+        season = match.group(2).zfill(2)
+        return f"{title}-S{season}"
+    # For movies: Title-Year
+    match = re.match(r"(.+?)\s*\(?(\d{4})\)?", name)
+    if match:
+        title = match.group(1).strip().replace(" ", "-")
+        year = match.group(2)
+        return f"{title}-{year}"
+    return name.split()[0].replace(" ", "-")
+
+# ------------------------------
+# Send Message Function
+# ------------------------------
+async def send_msg(bot, filename, caption, is_series=False):
     try:
-        # ✅ Clean inputs
-        filename = re.sub(r'\(\@\S+\)|\[\@\S+\]|\b@\S+|\bwww\.\S+', '', filename).strip()
-        caption = re.sub(r'\(\@\S+\)|\[\@\S+\]|\b@\S+|\bwww\.\S+', '', caption).strip()
-        
-        # ✅ Detect Year or Season
-        year_match = re.search(r"\b(19|20)\d{2}\b", caption)
-        year = year_match.group(0) if year_match else None
+        # ✅ Clean caption title
+        clean_caption_title = clean_title(filename, is_series)
+        # ✅ Button link base
+        button_base = clean_button_link(filename)
 
-        pattern = r"(?i)(?:s|season)0*(\d{1,2})"
-        season_match = re.search(pattern, caption) or re.search(pattern, filename)
-        season = season_match.group(1) if season_match else None 
+        # ✅ Detect type
+        tag = "#𝚃𝚅𝚂𝙴𝚁𝙸𝙴𝚂" if is_series else "#𝙼𝙾𝚅𝙸𝙴"
 
-        # Cut filename to year/season if exists
-        if year:
-            filename = filename[: filename.find(year) + 4]  
-        elif season and season in filename:
-            filename = filename[: filename.find(season) + 1]
-
-        # ✅ Language detection
-        languages = []
-        for lang in CAPTION_LANGUAGES:
-            if lang.lower() in caption.lower() and lang not in languages:
-                languages.append(lang)
-        language = ", ".join(languages) if languages else "Unknown"
-
-        # ✅ Clean filename
-        filename = re.sub(r"[\(\)\[\]\{\}:;'\-!]", "", filename)
-
-        # ✅ Prevent duplicates
+        # ✅ Avoid duplicates
         if not await add_name(OWNERID, filename):
-            print(f"⏩ Skipped duplicate: {filename}")
-            return
+            return  
 
         # ✅ IMDb details
-        imdb = await get_movie_details(filename) or {}
-        poster_url = imdb.get('poster_url')
+        imdb = await get_movie_details(filename)
+        genre = "Unknown"
+        resized_poster = None
+        if imdb:
+            if isinstance(imdb.get("genre"), list):
+                genre = ", ".join(imdb["genre"])
+            elif isinstance(imdb.get("genre"), str):
+                genre = imdb["genre"]
 
-        # ✅ Genre
-        genre = ", ".join(imdb.get("genre", [])) if isinstance(imdb.get("genre"), list) else imdb.get("genre", "Unknown")
+            poster_url = imdb.get("poster_url")
+            if poster_url:
+                img_bytes = await fetch_image(poster_url)
+                if img_bytes:
+                    img = Image.open(io.BytesIO(img_bytes))
+                    if img.width > img.height:  # landscape only
+                        resized_poster = img_bytes
 
-        # ✅ Movie vs Series
-        imdb_type = imdb.get("type", "movie").lower()
-        if imdb_type in ["tv", "tvseries", "series", "show"]:
-            hashtag = "#TVSERIES"
-            if season:  # Always append Season X
-                if f"Season {season}" not in filename:
-                    filename = f"{filename} Season {season}"
-        else:
-            hashtag = "#MOVIE"
+        # ------------------------------
+        # Auto-detect language (robust)
+        # ------------------------------
+        detected_langs = []
+        for lang in CAPTION_LANGUAGES:
+            if re.search(rf"\b{re.escape(lang.lower())}\b", caption.lower()) or \
+               re.search(rf"\b{re.escape(lang.lower())}\b", filename.lower()):
+                detected_langs.append(lang)
 
-        # ✅ Final caption
-        text = (
-            f"<b>✅ {filename} {hashtag}</b>\n\n"
+        # Remove duplicates while keeping order
+        seen = set()
+        unique_langs = []
+        for l in detected_langs:
+            if l not in seen:
+                unique_langs.append(l)
+                seen.add(l)
+
+        # Join multiple languages with commas
+        language = ", ".join(unique_langs) if unique_langs else "Unknown"
+
+        # ✅ Final caption (uses cleaned title)
+        final_caption = (
+            f"<b>✅ {clean_caption_title} {tag}</b>\n\n"
             f"<blockquote><b>🎙 {language}</b></blockquote>\n\n"
             f"<b>📽 Genre:</b> {genre}"
         )
 
-        # ✅ Inline button
-        filenames = filename.replace(" ", '-')
-        btn = [[InlineKeyboardButton('🔍 Tap to Search', url=f"https://telegram.me/{temp.U_NAME}?start=getfile-{filenames}")]]
-        
-        # ✅ Poster check: only send if landscape
-        if poster_url:
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(poster_url) as resp:
-                        if resp.status == 200:
-                            img_bytes = await resp.read()
-                            img = Image.open(io.BytesIO(img_bytes))
-                            if img.width > img.height:  # Only landscape
-                                await bot.send_photo(
-                                    chat_id=MOVIE_UPDATE_CHANNEL,
-                                    photo=img_bytes,
-                                    caption=text,
-                                    reply_markup=InlineKeyboardMarkup(btn)
-                                )
-                                return
-            except Exception as e:
-                print(f"⚠️ Poster fetch failed: {e}")
+        # ✅ Inline button (uses cleaned button link)
+        btn = [[
+            InlineKeyboardButton(
+                "🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑",
+                url=f"https://telegram.me/{temp.U_NAME}?start=getfile-{button_base}"
+            )
+        ]]
 
-        # ✅ Fallback (no poster or portrait)
-        await bot.send_message(
-            chat_id=MOVIE_UPDATE_CHANNEL,
-            text=text,
-            reply_markup=InlineKeyboardMarkup(btn)
-        )
+        # ✅ Send photo or message
+        if resized_poster:
+            await bot.send_photo(
+                chat_id=MOVIE_UPDATE_CHANNEL,
+                photo=resized_poster,
+                caption=final_caption,
+                parse_mode="html",
+                reply_markup=InlineKeyboardMarkup(btn)
+            )
+        else:
+            await bot.send_message(
+                chat_id=MOVIE_UPDATE_CHANNEL,
+                text=final_caption,
+                parse_mode="html",
+                reply_markup=InlineKeyboardMarkup(btn)
+            )
 
     except Exception as e:
         print(f"❌ Error in send_msg: {e}")
