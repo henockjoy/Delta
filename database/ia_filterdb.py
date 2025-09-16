@@ -6,6 +6,7 @@ import io
 import aiohttp
 from pyrogram.file_id import FileId
 from pymongo.errors import DuplicateKeyError
+from pyrogram.enums import ParseMode
 from umongo import Instance, Document, fields
 from motor.motor_asyncio import AsyncIOMotorClient
 from marshmallow.exceptions import ValidationError
@@ -217,11 +218,28 @@ def unpack_new_file_id(new_file_id):
     return file_id, file_ref
 
 # ------------------------------
+# Helper: Clean noisy tags from filenames
+# ------------------------------
+def remove_noise_tags(filename: str) -> str:
+    noise_patterns = [
+        r"\bHQ\b", r"\bHDRip\b", r"\bWEBRip\b", r"\bWEB-DL\b", r"\bBluRay\b",
+        r"\b10bit\b", r"\bDDP?5\.1\b", r"\bAAC\b", r"\bATMOS\b", r"\bx264\b",
+        r"\bx265\b", r"\bHEVC\b", r"\bESub\b", r"\bMULTi\b", r"\bDS4K\b",
+        r"\b[0-9]{3,4}p\b", r"\bJHS\b", r"\bMRiPS\b"
+    ]
+    name = filename
+    for pattern in noise_patterns:
+        name = re.sub(pattern, "", name, flags=re.IGNORECASE)
+    # Replace multiple spaces or dots/underscores with single space
+    name = re.sub(r"[._]+", " ", name)
+    return name.strip()
+
+# ------------------------------
 # Title Cleaning Functions
 # ------------------------------
 def clean_title(filename: str, is_series: bool = False) -> str:
     """Returns cleaned movie or series title with year for movies."""
-    name = re.sub(r"[._]+", " ", filename)
+    name = remove_noise_tags(filename)
 
     if is_series:
         match = re.match(r"(.+?)\s*[Ss](\d{1,2})[ ._-]?[Ee](\d{1,2})", name)
@@ -231,7 +249,6 @@ def clean_title(filename: str, is_series: bool = False) -> str:
             episode = match.group(3).zfill(2)
             return f"{title} S{season}E{episode}"
     else:
-        # Try to extract "Title (Year)" or "Title Year"
         match = re.match(r"(.+?)\s*\(?(\d{4})\)?", name)
         if match:
             title = match.group(1).strip()
@@ -242,7 +259,7 @@ def clean_title(filename: str, is_series: bool = False) -> str:
 
 def clean_button_link(filename: str) -> str:
     """Returns cleaned title for inline button with spaces replaced by '-'."""
-    name = re.sub(r"[._]+", " ", filename)
+    name = remove_noise_tags(filename)
     # For series: Title-S01
     match = re.match(r"(.+?)\s*[Ss](\d{1,2})", name)
     if match:
@@ -312,14 +329,14 @@ async def send_msg(bot, filename, caption, is_series=False):
         # Join multiple languages with commas
         language = ", ".join(unique_langs) if unique_langs else "Unknown"
 
-        # ✅ Final caption (uses cleaned title)
+        # ✅ Final caption
         final_caption = (
             f"<b>✅ {clean_caption_title} {tag}</b>\n\n"
             f"<blockquote><b>🎙 {language}</b></blockquote>\n\n"
             f"<b>📽 Genre:</b> {genre}"
         )
 
-        # ✅ Inline button (uses cleaned button link)
+        # ✅ Inline button
         btn = [[
             InlineKeyboardButton(
                 "🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑",
@@ -333,14 +350,14 @@ async def send_msg(bot, filename, caption, is_series=False):
                 chat_id=MOVIE_UPDATE_CHANNEL,
                 photo=resized_poster,
                 caption=final_caption,
-                parse_mode="html",
+                parse_mode=ParseMode.HTML,
                 reply_markup=InlineKeyboardMarkup(btn)
             )
         else:
             await bot.send_message(
                 chat_id=MOVIE_UPDATE_CHANNEL,
                 text=final_caption,
-                parse_mode="html",
+                parse_mode=ParseMode.HTML,
                 reply_markup=InlineKeyboardMarkup(btn)
             )
 
