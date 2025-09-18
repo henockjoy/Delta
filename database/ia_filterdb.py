@@ -16,6 +16,7 @@ from database.users_chats_db import add_name
 from .Imdbposter import get_movie_details, fetch_image
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from PIL import Image
+from rapidfuzz import fuzz
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -255,13 +256,11 @@ def clean_title(filename: str, is_series: bool = False) -> str:
 
 def clean_button_link(filename: str) -> str:
     name = remove_noise_tags(filename)
-    # Series: Title-S01
     match = re.match(r"(.+?)\s*[Ss](\d{1,2})", name)
     if match:
         title = match.group(1).strip().replace(" ", "-")
         season = match.group(2).zfill(2)
         return f"{title}-S{season}"
-    # Movie: Title-Year
     match = re.match(r"(.+?)\s*\(?(\d{4})\)?", name)
     if match:
         title = match.group(1).strip().replace(" ", "-")
@@ -270,7 +269,36 @@ def clean_button_link(filename: str) -> str:
     return name.split()[0].replace(" ", "-")
 
 # ------------------------------
-# Send Message Function (No Poster)
+# Duplicate Check (Season + Episode Aware)
+# ------------------------------
+async def is_duplicate(owner_id: int, title: str) -> bool:
+    title = title.lower().strip()
+    match = re.search(r's(\d{1,2})e(\d{1,2})', title, re.IGNORECASE)
+    current_season = match.group(1).zfill(2) if match else None
+    current_episode = match.group(2).zfill(2) if match else None
+
+    stored_names = await get_all_names(owner_id)
+
+    for stored in stored_names:
+        stored_lower = stored.lower().strip()
+        stored_match = re.search(r's(\d{1,2})e(\d{1,2})', stored_lower, re.IGNORECASE)
+        stored_season = stored_match.group(1).zfill(2) if stored_match else None
+        stored_episode = stored_match.group(2).zfill(2) if stored_match else None
+
+        if current_season and current_episode and stored_season and stored_episode:
+            if current_season == stored_season and current_episode == stored_episode:
+                return True  # same episode → duplicate
+            continue  # different season/episode → allow
+
+        ratio = fuzz.ratio(title, stored_lower)
+        if ratio >= 90:
+            return True  # movie duplicate
+
+    await add_name(owner_id, title)
+    return False
+
+# ------------------------------
+# Send Message Function
 # ------------------------------
 async def send_msg(bot, filename, caption, is_series=False):
     try:
@@ -278,31 +306,33 @@ async def send_msg(bot, filename, caption, is_series=False):
         button_base = clean_button_link(filename)
         tag = "#𝚃𝚅𝚂𝙴𝚁𝙸𝙴𝚂" if is_series else "#𝙼𝙾𝚅𝙸𝙴"
 
-        # Duplicate check using cleaned title
-        if not await add_name(OWNERID, clean_caption_title):
+        # ✅ Duplicate check
+        if await is_duplicate(OWNERID, clean_caption_title):
             return
 
-        # IMDb genre (robust version)
+        # IMDb details
         imdb = await get_movie_details(clean_caption_title)
         genre = "Unknown"
-        if imdb:
-            # Check multiple possible keys
-            if "genre" in imdb:
-                if isinstance(imdb["genre"], list):
-                    genre = ", ".join(imdb["genre"])
-                else:
-                    genre = str(imdb["genre"])
-            elif "genres" in imdb:
-                if isinstance(imdb["genres"], list):
-                    genre = ", ".join(imdb["genres"])
-                else:
-                    genre = str(imdb["genres"])
-            elif "Genre" in imdb:
-                if isinstance(imdb["Genre"], list):
-                    genre = ", ".join(imdb["Genre"])
-                else:
-                    genre = str(imdb["Genre"])
+        imdb_link = None
+        imdb_rating = None
 
+        if imdb:
+            if "genre" in imdb:
+                genre = ", ".join(imdb["genre"]) if isinstance(imdb["genre"], list) else str(imdb["genre"])
+            elif "genres" in imdb:
+                genre = ", ".join(imdb["genres"]) if isinstance(imdb["genres"], list) else str(imdb["genres"])
+            elif "Genre" in imdb:
+                genre = ", ".join(imdb["Genre"]) if isinstance(imdb["Genre"], list) else str(imdb["Genre"])
+
+            if "imdb_id" in imdb:
+                imdb_link = f"https://www.imdb.com/title/{imdb['imdb_id']}"
+            elif "imdbID" in imdb:
+                imdb_link = f"https://www.imdb.com/title/{imdb['imdbID']}"
+
+            if "imdb_rating" in imdb:
+                imdb_rating = imdb["imdb_rating"]
+            elif "imdbRating" in imdb:
+                imdb_rating = imdb["imdbRating"]
 
         # Detect languages
         detected_langs = []
@@ -311,16 +341,19 @@ async def send_msg(bot, filename, caption, is_series=False):
                re.search(rf"\b{re.escape(lang.lower())}\b", filename.lower()):
                 detected_langs.append(lang)
 
-        seen = set()
-        unique_langs = [l for l in detected_langs if not (l in seen or seen.add(l))]
-        language = ", ".join(unique_langs) if unique_langs else "Unknown"
+        unique_langs = list(dict.fromkeys(detected_langs))  # preserve order
+        language_line = " | ".join(unique_langs) if unique_langs else "Unknown"
 
-        # Final caption
+        # Build caption
         final_caption = (
             f"<b>✅ {clean_caption_title} {tag}</b>\n\n"
-            f"<blockquote><b>🎙 {language}</b></blockquote>\n\n"
-            f"<b>📽 Genre:</b> {genre}"
+            f"<blockquote><b>🎙 {language_line}</b></blockquote>\n\n"
         )
+
+        if imdb_link:
+            final_caption += f"<b>⭐ <a href='{imdb_link}'>IMDb</a></b>\n"
+
+        final_caption += f"<b>📽 Genre:</b> {genre}"
 
         # Inline button
         btn = [[
@@ -330,7 +363,6 @@ async def send_msg(bot, filename, caption, is_series=False):
             )
         ]]
 
-        # Send message only (no poster)
         await bot.send_message(
             chat_id=MOVIE_UPDATE_CHANNEL,
             text=final_caption,
