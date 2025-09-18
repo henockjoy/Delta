@@ -69,3 +69,4 @@ git+https://github.com/Joelkb/cinemagoer
 apscheduler
 opencv-python-headless==4.8.1.78
 telegraph==2.2.0
+rapidfuzz
