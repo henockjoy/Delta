@@ -5,6 +5,8 @@ import base64
 import datetime
 import io
 import aiohttp
+import asyncio
+from pyrogram import Client
 from pyrogram.file_id import FileId
 from pymongo.errors import DuplicateKeyError
 from pyrogram.enums import ParseMode
@@ -225,84 +227,68 @@ def unpack_new_file_id(new_file_id):
 # -------------------------
 mongo_client = AsyncIOMotorClient(DATABASE_URI)
 db = mongo_client[DATABASE_NAME]
-collection = db[COLLECTION_NAME]       # Original Media collection
-sent_messages = db["sent_messages"]    # Track sent messages
+collection = db[COLLECTION_NAME]       # Main media collection
+sent_messages = db["sent_messages"]    # Temporary tracker for duplicates
+
+# TTL index (1 day auto cleanup)
+async def init_indexes():
+    try:
+        await sent_messages.create_index("created_at", expireAfterSeconds=86400)
+        logger.info("✅ TTL index created on sent_messages")
+    except Exception as e:
+        logger.warning(f"⚠️ Index creation failed (maybe exists): {e}")
 
 # -------------------------
-# Noise cleaner
+# Helper: Episode Range Formatter
 # -------------------------
-def remove_noise_tags(filename: str) -> str:
-    noise_patterns = [
-        r"\bHQ\b", r"\bHDRip\b", r"\bWEBRip\b", r"\bWEB-DL\b", r"\bWEB-HD\b", r"\bBluRay\b",
-        r"\b10bit\b", r"\bDDP?5\.1\b", r"\bAAC\b", r"\bATMOS\b", r"\bx264\b",
-        r"\bx265\b", r"\bHEVC\b", r"\bESub\b", r"\bMULTi\b", r"\bDS4K\b",
-        r"\b[0-9]{3,4}p\b", r"\bMRiPS\b"
-    ]
-    name = filename
-    for pattern in noise_patterns:
-        name = re.sub(pattern, "", name, flags=re.IGNORECASE)
-    name = re.sub(r"[._]+", " ", name)
-    return name.strip()
+def format_episode_ranges(episodes):
+    nums = sorted(set(int(ep) for ep in episodes if str(ep).isdigit()))
+    if not nums:
+        return ""
+    ranges = []
+    start = prev = nums[0]
+    for n in nums[1:]:
+        if n == prev + 1:
+            prev = n
+        else:
+            ranges.append(f"{start:02d}" if start == prev else f"{start:02d}–{prev:02d}")
+            start = prev = n
+    ranges.append(f"{start:02d}" if start == prev else f"{start:02d}–{prev:02d}")
+    return ", ".join(ranges)
 
 # -------------------------
 # Title cleaner
 # -------------------------
 def clean_title(filename: str):
-    name = remove_noise_tags(filename)
-
-    # Series detection
-    match = re.match(r"(.+?)\s*[Ss](\d{1,2})[Ee](\d{1,2})", name)
+    name = re.sub(r"[._]+", " ", filename)
+    match = re.match(r"(.+?)\s[Ss](\d{1,2})[Ee](\d{1,2})", name)
     if match:
         title = match.group(1).strip()
         season = match.group(2).zfill(2)
         episode = match.group(3).zfill(2)
         return f"{title} S{season}", True, episode
-
-    # Season detection only
-    match = re.match(r"(.+?)\s*[Ss](\d{1,2})", name)
+    match = re.match(r"(.+?)\s[Ss](\d{1,2})", name)
     if match:
         title = match.group(1).strip()
         season = match.group(2).zfill(2)
         return f"{title} S{season}", True, None
-
-    # Movie detection
     match = re.match(r"(.+?)\s*\(?(\d{4})\)?", name)
     if match:
         title = match.group(1).strip()
-        year = match.group(2)
-        return f"{title} {year}", False, None
-
+        return f"{title} {match.group(2)}", False, None
     return name.strip(), False, None
 
-def clean_button_link(filename: str) -> str:
-    name = remove_noise_tags(filename)
-    match = re.match(r"(.+?)\s*[Ss](\d{1,2})", name)
-    if match:
-        title = match.group(1).strip().replace(" ", "-")
-        season = match.group(2).zfill(2)
-        return f"{title}-S{season}"
-    match = re.match(r"(.+?)\s*\(?(\d{4})\)?", name)
-    if match:
-        title = match.group(1).strip().replace(" ", "-")
-        year = match.group(2)
-        return f"{title}-{year}"
-    return name.split()[0].replace(" ", "-")
-
 # -------------------------
-# Send message
+# Send message logic
 # -------------------------
-async def send_msg(bot, filename, caption):
+async def send_msg(bot, filename, caption=""):
     try:
         clean_caption_title, is_series, episode = clean_title(filename)
         today = datetime.date.today().isoformat()
         tag = "#𝚃𝚅𝚂𝙴𝚁𝙸𝙴𝚂" if is_series else "#𝙼𝙾𝚅𝙸𝙴"
-        button_base = clean_button_link(filename)
 
-        # Detect language
-        detected_langs = [lang for lang in CAPTION_LANGUAGES
-                          if re.search(rf"\b{re.escape(lang.lower())}\b", caption.lower()) or
-                             re.search(rf"\b{re.escape(lang.lower())}\b", filename.lower())]
-        language = ", ".join(detected_langs) if detected_langs else "Unknown"
+        detected_langs = ["Unknown"]
+        language = ", ".join(detected_langs)
 
         # IMDb fetch
         search_title = re.sub(r"\s[Ss]\d{1,2}", "", clean_caption_title)
@@ -317,119 +303,88 @@ async def send_msg(bot, filename, caption):
                     break
 
         # -------------------------
-        # TV SERIES LOGIC
+        # TV SERIES
         # -------------------------
         if is_series:
             existing = await sent_messages.find_one({"title": clean_caption_title, "date": today})
-
             if existing:
-                # Update episodes & languages
-                episodes = set(existing.get("episodes", []))
+                episodes = existing.get("episodes", [])
                 if episode:
-                    episodes.add(episode)
-                langs = set(existing.get("languages", []))
-                langs.update(detected_langs)
+                    episodes.append(episode)
+                episodes = list(set(episodes))
+                logger.info(f"[TV] Updating {clean_caption_title} | Episodes: {format_episode_ranges(episodes)}")
 
+                # Edit previous message
                 final_caption = f"<b>✅ {clean_caption_title} {tag}</b>\n\n"
-                final_caption += f"<blockquote><b>🎙 {', '.join(langs) or 'Unknown'}</b></blockquote>\n"
-                final_caption += f"<blockquote><b>📺 Episodes:</b> {', '.join(sorted(episodes))}</blockquote>\n\n"
+                final_caption += f"<blockquote><b>🎙 {', '.join(detected_langs)}</b></blockquote>\n"
+                final_caption += f"<blockquote><b>📺 Episodes:</b> {format_episode_ranges(episodes)}</blockquote>\n\n"
                 if imdb_link:
                     final_caption += f"<b>⭐ <a href='{imdb_link}'>IMDb</a></b>\n"
                 if genre:
                     final_caption += f"<b>📽 Genre:</b> {genre}"
 
-                await bot.edit_message_text(
-                    chat_id=MOVIE_UPDATE_CHANNEL,
-                    message_id=existing["msg_id"],
-                    text=final_caption,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton(
-                            "🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑",
-                            url=f"https://telegram.me/{bot.me.username}?start=getfile-{button_base}"
-                        )
-                    ]])
-                )
-
-                await sent_messages.update_one(
-                    {"_id": existing["_id"]},
-                    {"$set": {"episodes": list(episodes), "languages": list(langs)}}
-                )
-                return
-
-            # New message for today
-            final_caption = f"<b>✅ {clean_caption_title} {tag}</b>\n\n"
-            final_caption += f"<blockquote><b>🎙 {language}</b></blockquote>\n"
-            if episode:
-                final_caption += f"<blockquote><b>📺 Episodes:</b> {episode}</blockquote>\n\n"
-            if imdb_link:
-                final_caption += f"<b>⭐ <a href='{imdb_link}'>IMDb</a></b>\n"
-            if genre:
-                final_caption += f"<b>📽 Genre:</b> {genre}"
-
-            msg = await bot.send_message(
-                chat_id=MOVIE_UPDATE_CHANNEL,
-                text=final_caption,
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton(
-                        "🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑",
-                        url=f"https://telegram.me/{bot.me.username}?start=getfile-{button_base}"
-                    )
-                ]])
-            )
-
-            await sent_messages.insert_one({
-                "title": clean_caption_title,
-                "msg_id": msg.message_id,
-                "date": today,
-                "episodes": [episode] if episode else [],
-                "languages": detected_langs
-            })
-            return
-
-        # -------------------------
-        # MOVIE LOGIC
-        # -------------------------
-        else:
-            existing = await sent_messages.find_one({"title": clean_caption_title})
-
-            if existing:
-                # Only update within the same day
-                if existing.get("date") == today:
-                    langs = set(existing.get("languages", []))
-                    langs.update(detected_langs)
-                    final_language = ", ".join(langs)
-
-                    final_caption = f"<b>✅ {clean_caption_title} {tag}</b>\n\n"
-                    final_caption += f"<blockquote><b>🎙 {final_language}</b></blockquote>\n\n"
-                    if imdb_link:
-                        final_caption += f"<b>⭐ <a href='{imdb_link}'>IMDb</a></b>\n"
-                    if genre:
-                        final_caption += f"<b>📽 Genre:</b> {genre}"
-
+                try:
                     await bot.edit_message_text(
                         chat_id=MOVIE_UPDATE_CHANNEL,
                         message_id=existing["msg_id"],
                         text=final_caption,
                         parse_mode=ParseMode.HTML,
                         reply_markup=InlineKeyboardMarkup([[
-                            InlineKeyboardButton(
-                                "🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑",
-                                url=f"https://telegram.me/{bot.me.username}?start=getfile-{button_base}"
-                            )
+                            InlineKeyboardButton("🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑",
+                                                 url=f"https://telegram.me/{bot.me.username}?start=getfile-{clean_caption_title.replace(' ', '-')}")
                         ]])
                     )
+                except Exception as e:
+                    logger.error(f"Edit failed: {e}")
 
-                    await sent_messages.update_one(
-                        {"_id": existing["_id"]},
-                        {"$set": {"languages": list(langs)}}
-                    )
+                await sent_messages.update_one(
+                    {"_id": existing["_id"]},
+                    {"$set": {"episodes": episodes, "created_at": datetime.datetime.utcnow()}}
+                )
+            else:
+                logger.info(f"[TV] Sending new message for {clean_caption_title} | Episode: {episode}")
+
+                final_caption = f"<b>✅ {clean_caption_title} {tag}</b>\n\n"
+                final_caption += f"<blockquote><b>🎙 {', '.join(detected_langs)}</b></blockquote>\n"
+                if episode:
+                    final_caption += f"<blockquote><b>📺 Episodes:</b> {episode}</blockquote>\n\n"
+                if imdb_link:
+                    final_caption += f"<b>⭐ <a href='{imdb_link}'>IMDb</a></b>\n"
+                if genre:
+                    final_caption += f"<b>📽 Genre:</b> {genre}"
+
+                msg = await bot.send_message(
+                    chat_id=MOVIE_UPDATE_CHANNEL,
+                    text=final_caption,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑",
+                                             url=f"https://telegram.me/{bot.me.username}?start=getfile-{clean_caption_title.replace(' ', '-')}")
+                    ]])
+                )
+
+                await sent_messages.insert_one({
+                    "title": clean_caption_title,
+                    "msg_id": msg.message_id,
+                    "date": today,
+                    "episodes": [episode] if episode else [],
+                    "created_at": datetime.datetime.utcnow()
+                })
+            return
+
+        # -------------------------
+        # MOVIE
+        # -------------------------
+        else:
+            existing = await sent_messages.find_one({"title": clean_caption_title, "date": today})
+            if existing:
+                logger.info(f"[MOVIE] {clean_caption_title} already sent today, skipping")
                 return
 
-            # New movie message
+            logger.info(f"[MOVIE] Sending new message for {clean_caption_title}")
+
             final_caption = f"<b>✅ {clean_caption_title} {tag}</b>\n\n"
-            final_caption += f"<blockquote><b>🎙 {language}</b></blockquote>\n\n"
+            final_caption += f"<blockquote><b>🎙 {', '.join(detected_langs)}</b></blockquote>\n\n"
             if imdb_link:
                 final_caption += f"<b>⭐ <a href='{imdb_link}'>IMDb</a></b>\n"
             if genre:
@@ -438,24 +393,33 @@ async def send_msg(bot, filename, caption):
             msg = await bot.send_message(
                 chat_id=MOVIE_UPDATE_CHANNEL,
                 text=final_caption,
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton(
-                        "🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑",
-                        url=f"https://telegram.me/{bot.me.username}?start=getfile-{button_base}"
-                    )
-                ]])
+                parse_mode=ParseMode.HTML
             )
 
             await sent_messages.insert_one({
                 "title": clean_caption_title,
                 "msg_id": msg.message_id,
                 "date": today,
-                "languages": detected_langs
+                "created_at": datetime.datetime.utcnow()
             })
 
     except Exception as e:
         logger.error(f"❌ Error in send_msg: {e}")
+
+# -------------------------
+# Watch MongoDB for new files
+# -------------------------
+async def watch_media_collection(bot):
+    logger.info("Starting media watcher...")
+    async with collection.watch([{"$match": {"operationType": "insert"}}]) as stream:
+        async for change in stream:
+            doc = change["fullDocument"]
+            filename = doc.get("filename") or doc.get("name")
+            caption = doc.get("caption", "")
+            if filename:
+                logger.info(f"New file detected: {filename}")
+                await send_msg(bot, filename, caption)
+
 
         
 async def get_qualities(text, qualities: list):
