@@ -23,9 +23,9 @@ from utils import temp
 from Script import script
 from plugins import web_server, check_expired_premium
 from LucyBot.Bot import Codeflix
+from database.ia_filterdb import send_msg
 from LucyBot.util.keepalive import ping_server
 from LucyBot.Bot.clients import initialize_clients
-from LucyBot.Bot import watcher
 
 logging.config.fileConfig('logging.conf')
 logging.getLogger().setLevel(logging.INFO)
@@ -41,6 +41,23 @@ logging.getLogger("aiohttp.web").setLevel(logging.ERROR)
 botStartTime = time.time()
 ppath = "plugins/*.py"
 files = glob.glob(ppath)
+
+async def watch_media_collection(bot):
+    print("✅ MongoDB watcher started")
+    while True:
+        try:
+            today = datetime.date.today().isoformat()
+            async for media in Media.find({"sent": {"$ne": True}}):
+                filename = media.get("filename")
+                caption = media.get("caption", "")
+                if filename:
+                    await send_msg(bot, filename, caption)
+                    await Media.update_one({"_id": media["_id"]}, {"$set": {"sent": True}})
+            await asyncio.sleep(5)
+        except Exception as e:
+            print(f"Watcher error: {e}")
+            await asyncio.sleep(5)
+
 
 async def Lucy_start():
     print('\n')
@@ -82,7 +99,8 @@ async def Lucy_start():
     temp.B_LINK = me.mention
     Codeflix.username = '@' + me.username
     Codeflix.loop.create_task(check_expired_premium(Codeflix))
-    Codeflix.loop.create_task(watcher.watch_media_collection(Codeflix))
+    # Start MongoDB watcher
+    Codeflix.loop.create_task(watch_media_collection(Codeflix))
     logging.info("✅ MongoDB watcher started in background")
     logging.info(f"{me.first_name} with Pyrogram v{__version__} (Layer {layer}) started on {me.username}.")
     logging.info(LOG_STR)
