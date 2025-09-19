@@ -225,7 +225,6 @@ def unpack_new_file_id(new_file_id):
 mongo_client = AsyncIOMotorClient(DATABASE_URI)
 db = mongo_client[DATABASE_NAME]
 collection = db[COLLECTION_NAME]
-
 # -------------------------
 # Helper: Clean noisy tags
 # -------------------------
@@ -245,23 +244,38 @@ def remove_noise_tags(filename: str) -> str:
 # -------------------------
 # Title cleaning
 # -------------------------
-def clean_title(filename: str, is_series: bool = False) -> str:
+def clean_title(filename: str, is_series: bool = False) -> tuple[str, bool]:
+    """
+    Cleans the filename and returns a tuple:
+    (clean_title_str, is_series_detected)
+    """
     name = remove_noise_tags(filename)
-    # Series detection
-    match = re.match(r"(.+?)\s*[Ss](\d{1,2})(?:[ ._-]?[Ee](\d{1,2}))?", name)
-    if match:
-        title = match.group(1).strip()
-        season = match.group(2).zfill(2)
-        episode = match.group(3).zfill(2) if match.group(3) else None
-        if episode:
-            return f"{title} S{season}E{episode}", True
-        return f"{title} S{season}", True
+
+    # Series detection patterns (flexible)
+    series_patterns = [
+        r"(.+?)\s*[Ss](\d{1,2})[Ee](\d{1,2})",      # S01E01, s1e1
+        r"(.+?)\s*[Ss](\d{1,2})\s*-\s*E?(\d{1,2})", # S01-E01 or S1-1
+        r"(.+?)\s*[Ss](\d{1,2})"                     # S01 or s1
+    ]
+
+    for pattern in series_patterns:
+        match = re.match(pattern, name)
+        if match:
+            title = match.group(1).strip()
+            season = match.group(2).zfill(2)
+            episode = match.group(3).zfill(2) if len(match.groups()) > 2 and match.group(3) else None
+            if episode:
+                return f"{title} S{season}E{episode}", True
+            return f"{title} S{season}", True
+
     # Movie detection
-    match = re.match(r"(.+?)\s*\(?(\d{4})\)?", name)
-    if match:
-        title = match.group(1).strip()
-        year = match.group(2)
+    movie_match = re.match(r"(.+?)\s*\(?(\d{4})\)?", name)
+    if movie_match:
+        title = movie_match.group(1).strip()
+        year = movie_match.group(2)
         return f"{title} {year}", False
+
+    # Default fallback
     return name.strip(), is_series
 
 def clean_button_link(filename: str) -> str:
