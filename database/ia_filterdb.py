@@ -311,14 +311,28 @@ async def is_duplicate(clean_title_str):
 # -------------------------
 async def send_msg(bot, filename, caption):
     try:
+        # Clean title & detect series
         clean_caption_title, is_series_detected = clean_title(filename)
         tag = "#𝚃𝚅𝚂𝙴𝚁𝙸𝙴𝚂" if is_series_detected else "#𝙼𝙾𝚅𝙸𝙴"
-        button_base = re.sub(r"\s+", "-", clean_caption_title)
 
-        # Check duplicates
-        if await is_duplicate(clean_caption_title):
-            logger.info(f"Skipping duplicate: {clean_caption_title}")
-            return
+        # Button link: season only for series, title-year for movies
+        if is_series_detected:
+            match = re.search(r"[Ss](\d{1,2})", clean_caption_title)
+            season = match.group(1).zfill(2) if match else "01"
+            button_base = re.sub(r"\s+", "-", re.sub(r"(S\d+E\d+)", f"S{season}", clean_caption_title))
+        else:
+            button_base = re.sub(r"\s+", "-", clean_caption_title)
+
+        # Duplicate check
+        cursor = collection.find({}, {"file_name": 1, "caption": 1}).sort("_id", -1).limit(300)
+        norm_title = re.sub(r"[^\w]", "", clean_caption_title.lower())
+        async for f in cursor:
+            for field in ["file_name", "caption"]:
+                db_val = f.get(field, "") or ""
+                db_norm = re.sub(r"[^\w]", "", db_val.lower())
+                if fuzz.ratio(norm_title, db_norm) > 90:
+                    logging.info(f"Skipping duplicate: {clean_caption_title}")
+                    return
 
         # IMDb fetch
         search_title = re.sub(r"\s[Ss]\d{1,2}[Ee]\d{1,2}", "", clean_caption_title)
@@ -363,7 +377,7 @@ async def send_msg(bot, filename, caption):
         )
 
     except Exception as e:
-        logger.error(f"❌ Error in send_msg: {e}")
+        logging.error(f"❌ Error in send_msg: {e}")
 
         
 async def get_qualities(text, qualities: list):
