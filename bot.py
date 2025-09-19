@@ -16,14 +16,13 @@ from datetime import date, datetime
 import pytz
 from aiohttp import web
 
-from database.ia_filterdb import Media, choose_mediaDB, tempDict, db as clientDB
+from database.ia_filterdb import Media, choose_mediaDB, tempDict, db as clientDB, send_msg
 from database.users_chats_db import db
 from info import *
 from utils import temp
 from Script import script
 from plugins import web_server, check_expired_premium
 from LucyBot.Bot import Codeflix
-from database.ia_filterdb import send_msg
 from LucyBot.util.keepalive import ping_server
 from LucyBot.Bot.clients import initialize_clients
 
@@ -42,17 +41,25 @@ botStartTime = time.time()
 ppath = "plugins/*.py"
 files = glob.glob(ppath)
 
-async def watch_media_collection(bot):
+# -------------------------
+# MongoDB watcher
+# ------------------------- 
+async def watch_media_collection(bot):  # <<< ADDED
     print("✅ MongoDB watcher started")
     while True:
         try:
-            today = date.today().isoformat()  # ✅ use 'date', not 'datetime.date'
+            today = date.today().isoformat()  # <<< EDITED: use 'date.today()' instead of 'datetime.date.today()'
             async for media in Media.find({"sent": {"$ne": True}}):
+                if not media or not isinstance(media, dict):  # <<< ADDED: skip invalid documents
+                    continue
+
                 filename = media.get("filename")
                 caption = media.get("caption", "")
+
                 if filename:
-                    await send_msg(bot, filename, caption)
-                    await Media.update_one({"_id": media["_id"]}, {"$set": {"sent": True}})
+                    await send_msg(bot, filename, caption)  # <<< ADDED: call your existing send_msg()
+                    await Media.update_one({"_id": media["_id"]}, {"$set": {"sent": True}})  # <<< ADDED: mark as sent
+
             await asyncio.sleep(5)
         except Exception as e:
             print(f"Watcher error: {e}")
