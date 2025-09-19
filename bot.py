@@ -46,7 +46,7 @@ async def watch_media_collection(bot):
     print("✅ MongoDB watcher started")
     while True:
         try:
-            today = datetime.date.today().isoformat()
+            today = date.today().isoformat()  # ✅ use 'date', not 'datetime.date'
             async for media in Media.find({"sent": {"$ne": True}}):
                 filename = media.get("filename")
                 caption = media.get("caption", "")
