@@ -16,7 +16,7 @@ from datetime import date, datetime
 import pytz
 from aiohttp import web
 
-from database.ia_filterdb import Media, choose_mediaDB, tempDict, db as clientDB, send_msg
+from database.ia_filterdb import Media, choose_mediaDB, tempDict, db as clientDB
 from database.users_chats_db import db
 from info import *
 from utils import temp
@@ -40,58 +40,6 @@ logging.getLogger("aiohttp.web").setLevel(logging.ERROR)
 botStartTime = time.time()
 ppath = "plugins/*.py"
 files = glob.glob(ppath)
-
-# -------------------------
-# Efficient MongoDB watcher
-# -------------------------
-async def watch_media_collection(bot):  # <<< ADDED
-    """
-    Watch the main Media collection for new inserts and send messages automatically.
-    Efficient: batch processing + minimal memory usage.
-    """
-    print("✅ Memory-efficient MongoDB watcher started")
-    
-    last_id = None  # Track last processed _id
-
-    while True:
-        try:
-            today = date.today().isoformat()
-
-            # Build query for unsent documents
-            query = {"sent": {"$ne": True}}
-            if last_id:
-                query["_id"] = {"$gt": last_id}
-
-            # Fetch in batches
-            batch_size = 10
-            cursor = Media.find(query).sort("_id", 1).limit(batch_size)
-            docs_processed = 0
-
-            async for media in cursor:
-                if not media or not isinstance(media, dict):
-                    continue
-
-                filename = media.get("filename")
-                caption = media.get("caption", "")
-
-                if filename:
-                    await send_msg(bot, filename, caption)  # <<< ADDED: call your existing send_msg()
-                    await Media.update_one(
-                        {"_id": media["_id"]},
-                        {"$set": {"sent": True}}
-                    )
-
-                    last_id = media["_id"]
-                    docs_processed += 1
-
-                    await asyncio.sleep(0.1)  # <<< ADDED: small delay to reduce memory spike
-
-            if docs_processed == 0:
-                await asyncio.sleep(5)  # <<< ADDED: no new docs, sleep longer
-
-        except Exception as e:
-            print(f"Watcher error: {e}")
-            await asyncio.sleep(5)
 
 async def Lucy_start():
     print('\n')
@@ -133,12 +81,6 @@ async def Lucy_start():
     temp.B_LINK = me.mention
     Codeflix.username = '@' + me.username
     Codeflix.loop.create_task(check_expired_premium(Codeflix))
-    # -------------------------
-    # Inside Lucy_start() (at the end, before idle())
-    # -------------------------
-    # <<< ADDED: start MongoDB watcher in background
-    Codeflix.loop.create_task(watch_media_collection(Codeflix))
-    logging.info("✅ Memory-efficient MongoDB watcher started in background")
     logging.info(f"{me.first_name} with Pyrogram v{__version__} (Layer {layer}) started on {me.username}.")
     logging.info(LOG_STR)
     logging.info(script.LOGO)
