@@ -224,7 +224,8 @@ def unpack_new_file_id(new_file_id):
 # -------------------------
 mongo_client = AsyncIOMotorClient(DATABASE_URI)
 db = mongo_client[DATABASE_NAME]
-collection = db[COLLECTION_NAME]
+collection = db[COLLECTION_NAME]         # Original Media collection
+sent_messages = db["sent_messages"]     # Separate collection for tracking sent messages
 # -------------------------
 # Helper: Clean noisy tags
 # -------------------------
@@ -244,38 +245,20 @@ def remove_noise_tags(filename: str) -> str:
 # -------------------------
 # Title cleaning
 # -------------------------
-def clean_title(filename: str, is_series: bool = False) -> tuple[str, bool]:
-    """
-    Cleans the filename and returns a tuple:
-    (clean_title_str, is_series_detected)
-    """
+def clean_title(filename: str, is_series: bool = False) -> (str, bool):
     name = remove_noise_tags(filename)
-
-    # Series detection patterns (flexible)
-    series_patterns = [
-        r"(.+?)\s*[Ss](\d{1,2})[Ee](\d{1,2})",      # S01E01, s1e1
-        r"(.+?)\s*[Ss](\d{1,2})\s*-\s*E?(\d{1,2})", # S01-E01 or S1-1
-        r"(.+?)\s*[Ss](\d{1,2})"                     # S01 or s1
-    ]
-
-    for pattern in series_patterns:
-        match = re.match(pattern, name)
-        if match:
-            title = match.group(1).strip()
-            season = match.group(2).zfill(2)
-            episode = match.group(3).zfill(2) if len(match.groups()) > 2 and match.group(3) else None
-            if episode:
-                return f"{title} S{season}E{episode}", True
-            return f"{title} S{season}", True
-
+    # Series detection
+    match = re.match(r"(.+?)\s*[Ss](\d{1,2})", name)
+    if match:
+        title = match.group(1).strip()
+        season = match.group(2).zfill(2)
+        return f"{title} S{season}", True
     # Movie detection
-    movie_match = re.match(r"(.+?)\s*\(?(\d{4})\)?", name)
-    if movie_match:
-        title = movie_match.group(1).strip()
-        year = movie_match.group(2)
+    match = re.match(r"(.+?)\s*\(?(\d{4})\)?", name)
+    if match:
+        title = match.group(1).strip()
+        year = match.group(2)
         return f"{title} {year}", False
-
-    # Default fallback
     return name.strip(), is_series
 
 def clean_button_link(filename: str) -> str:
@@ -284,7 +267,7 @@ def clean_button_link(filename: str) -> str:
     if match:
         title = match.group(1).strip().replace(" ", "-")
         season = match.group(2).zfill(2)
-        return f"{title}-S{season}"
+        return f"{title}-S{season}"   # Season only
     match = re.match(r"(.+?)\s*\(?(\d{4})\)?", name)
     if match:
         title = match.group(1).strip().replace(" ", "-")
@@ -293,49 +276,39 @@ def clean_button_link(filename: str) -> str:
     return name.split()[0].replace(" ", "-")
 
 # -------------------------
-# Optimized duplicate check
-# -------------------------
-async def is_duplicate(clean_title_str):
-    cursor = collection.find({}, {"file_name": 1, "caption": 1}).sort("_id", -1).limit(300)
-    norm_title = re.sub(r"[^\w]", "", clean_title_str.lower())
-    async for f in cursor:
-        for field in ["file_name", "caption"]:
-            db_val = f.get(field, "") or ""
-            db_norm = re.sub(r"[^\w]", "", db_val.lower())
-            if fuzz.ratio(norm_title, db_norm) > 90:
-                return True
-    return False
-
-# -------------------------
-# Send message
+# Send message with IMDb, genre, language
 # -------------------------
 async def send_msg(bot, filename, caption):
     try:
-        # Clean title & detect series
         clean_caption_title, is_series_detected = clean_title(filename)
         tag = "#𝚃𝚅𝚂𝙴𝚁𝙸𝙴𝚂" if is_series_detected else "#𝙼𝙾𝚅𝙸𝙴"
+        button_base = clean_button_link(filename)
 
-        # Button link: season only for series, title-year for movies
-        if is_series_detected:
-            match = re.search(r"[Ss](\d{1,2})", clean_caption_title)
-            season = match.group(1).zfill(2) if match else "01"
-            button_base = re.sub(r"\s+", "-", re.sub(r"(S\d+E\d+)", f"S{season}", clean_caption_title))
-        else:
-            button_base = re.sub(r"\s+", "-", clean_caption_title)
+        # -------------------------
+        # Check if message already sent
+        # -------------------------
+        existing = await sent_messages.find_one({"title": clean_caption_title})
+        detected_langs = [lang for lang in CAPTION_LANGUAGES
+                          if re.search(rf"\b{re.escape(lang.lower())}\b", caption.lower()) or
+                             re.search(rf"\b{re.escape(lang.lower())}\b", filename.lower())]
+        language = ", ".join(detected_langs) if detected_langs else "Unknown"
 
-        # Duplicate check
-        cursor = collection.find({}, {"file_name": 1, "caption": 1}).sort("_id", -1).limit(300)
-        norm_title = re.sub(r"[^\w]", "", clean_caption_title.lower())
-        async for f in cursor:
-            for field in ["file_name", "caption"]:
-                db_val = f.get(field, "") or ""
-                db_norm = re.sub(r"[^\w]", "", db_val.lower())
-                if fuzz.ratio(norm_title, db_norm) > 90:
-                    logging.info(f"Skipping duplicate: {clean_caption_title}")
-                    return
+        # Update language if already sent
+        if existing:
+            old_langs = existing.get("language", "")
+            combined_langs = list(set(old_langs.split(", ") + detected_langs))
+            final_language = ", ".join(combined_langs)
+            await sent_messages.update_one(
+                {"_id": existing["_id"]},
+                {"$set": {"language": final_language}}
+            )
+            # Edit the message if needed (optional)
+            return
 
+        # -------------------------
         # IMDb fetch
-        search_title = re.sub(r"\s[Ss]\d{1,2}[Ee]\d{1,2}", "", clean_caption_title)
+        # -------------------------
+        search_title = re.sub(r"\s[Ss]\d{1,2}", "", clean_caption_title)
         search_title = re.sub(r"\s\d{4}$", "", search_title).strip()
         imdb = await get_movie_details(search_title)
         imdb_link = ""
@@ -347,13 +320,9 @@ async def send_msg(bot, filename, caption):
                     genre = ", ".join([str(g).strip() for g in imdb[key]]) if isinstance(imdb[key], list) else str(imdb[key]).strip()
                     break
 
-        # Languages
-        detected_langs = [lang for lang in CAPTION_LANGUAGES
-                          if re.search(rf"\b{re.escape(lang.lower())}\b", caption.lower()) or
-                             re.search(rf"\b{re.escape(lang.lower())}\b", filename.lower())]
-        language = ", ".join(detected_langs) if detected_langs else "Unknown"
-
-        # Final caption
+        # -------------------------
+        # Build caption
+        # -------------------------
         final_caption = f"<b>✅ {clean_caption_title} {tag}</b>\n\n"
         final_caption += f"<blockquote><b>🎙 {language}</b></blockquote>\n\n"
         if imdb_link:
@@ -361,7 +330,9 @@ async def send_msg(bot, filename, caption):
         if genre:
             final_caption += f"<b>📽 Genre:</b> {genre}"
 
+        # -------------------------
         # Inline button
+        # -------------------------
         btn = [[
             InlineKeyboardButton(
                 "🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑",
@@ -369,15 +340,24 @@ async def send_msg(bot, filename, caption):
             )
         ]]
 
-        await bot.send_message(
+        # Send message
+        msg = await bot.send_message(
             chat_id=MOVIE_UPDATE_CHANNEL,
             text=final_caption,
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup(btn)
         )
 
+        # Save sent message to track languages
+        await sent_messages.insert_one({
+            "title": clean_caption_title,
+            "file_name": filename,
+            "msg_id": msg.message_id,
+            "language": language
+        })
+
     except Exception as e:
-        logging.error(f"❌ Error in send_msg: {e}")
+        logger.error(f"❌ Error in send_msg: {e}")
 
         
 async def get_qualities(text, qualities: list):
