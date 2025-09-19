@@ -219,9 +219,16 @@ def unpack_new_file_id(new_file_id):
     file_ref = encode_file_ref(decoded.file_reference)
     return file_id, file_ref
 
-# ------------------------------
-# Helper: Clean noisy tags from filenames
-# ------------------------------
+# -------------------------
+# MongoDB setup
+# -------------------------
+mongo_client = AsyncIOMotorClient(DATABASE_URI)
+db = mongo_client[DATABASE_NAME]
+collection = db[COLLECTION_NAME]
+
+# -------------------------
+# Helper: Clean noisy tags
+# -------------------------
 def remove_noise_tags(filename: str) -> str:
     noise_patterns = [
         r"\bHQ\b", r"\bHDRip\b", r"\bWEBRip\b", r"\bWEB-DL\b", r"\bWEB-HD\b", r"\bBluRay\b",
@@ -235,27 +242,27 @@ def remove_noise_tags(filename: str) -> str:
     name = re.sub(r"[._]+", " ", name)
     return name.strip()
 
-# ------------------------------
-# Title Cleaning Functions
-# ------------------------------
+# -------------------------
+# Title cleaning
+# -------------------------
 def clean_title(filename: str, is_series: bool = False) -> str:
     name = remove_noise_tags(filename)
-    if is_series:
-        match = re.match(r"(.+?)\s*[Ss](\d{1,2})(?:[ ._-]?[Ee](\d{1,2}))?", name)
-        if match:
-            title = match.group(1).strip()
-            season = match.group(2).zfill(2)
-            episode = match.group(3).zfill(2) if match.group(3) else None
-            if episode:
-                return f"{title} S{season}E{episode}"
-            return f"{title} S{season}"
-    else:
-        match = re.match(r"(.+?)\s*\(?(\d{4})\)?", name)
-        if match:
-            title = match.group(1).strip()
-            year = match.group(2)
-            return f"{title} {year}"
-    return name.strip()
+    # Series detection
+    match = re.match(r"(.+?)\s*[Ss](\d{1,2})(?:[ ._-]?[Ee](\d{1,2}))?", name)
+    if match:
+        title = match.group(1).strip()
+        season = match.group(2).zfill(2)
+        episode = match.group(3).zfill(2) if match.group(3) else None
+        if episode:
+            return f"{title} S{season}E{episode}", True
+        return f"{title} S{season}", True
+    # Movie detection
+    match = re.match(r"(.+?)\s*\(?(\d{4})\)?", name)
+    if match:
+        title = match.group(1).strip()
+        year = match.group(2)
+        return f"{title} {year}", False
+    return name.strip(), is_series
 
 def clean_button_link(filename: str) -> str:
     name = remove_noise_tags(filename)
@@ -270,80 +277,63 @@ def clean_button_link(filename: str) -> str:
         year = match.group(2)
         return f"{title}-{year}"
     return name.split()[0].replace(" ", "-")
-# ------------------------------
-# Initialize MongoDB collection
-# ------------------------------
-mongo_client = AsyncIOMotorClient(DATABASE_URI)
-db = mongo_client[DATABASE_NAME]
-collection = db[COLLECTION_NAME]
 
-# ------------------------------
-# Send Message Function
-# ------------------------------
-async def send_msg(bot, filename, caption, is_series=False, collection=None):
+# -------------------------
+# Optimized duplicate check
+# -------------------------
+async def is_duplicate(clean_title_str):
+    cursor = collection.find({}, {"file_name": 1, "caption": 1}).sort("_id", -1).limit(300)
+    norm_title = re.sub(r"[^\w]", "", clean_title_str.lower())
+    async for f in cursor:
+        for field in ["file_name", "caption"]:
+            db_val = f.get(field, "") or ""
+            db_norm = re.sub(r"[^\w]", "", db_val.lower())
+            if fuzz.ratio(norm_title, db_norm) > 90:
+                return True
+    return False
+
+# -------------------------
+# Send message
+# -------------------------
+async def send_msg(bot, filename, caption):
     try:
-        clean_caption_title = clean_title(filename, is_series)
-        button_base = clean_button_link(filename)
-        tag = "#𝚃𝚅𝚂𝙴𝚁𝙸𝙴𝚂" if is_series else "#𝙼𝙾𝚅𝙸𝙴"
+        clean_caption_title, is_series_detected = clean_title(filename)
+        tag = "#𝚃𝚅𝚂𝙴𝚁𝙸𝙴𝚂" if is_series_detected else "#𝙼𝙾𝚅𝙸𝙴"
+        button_base = re.sub(r"\s+", "-", clean_caption_title)
 
-        # ------------------------
-        # Duplicate check using fuzzy matching (read-only)
-        # ------------------------
-        duplicate_found = False
-        async for f in collection.find({}, {"file_name": 1, "caption": 1}):
-            db_name = f.get("file_name", "") or ""
-            db_caption = f.get("caption", "") or ""
-            if fuzz.ratio(clean_caption_title.lower(), db_name.lower()) > 90 or \
-               fuzz.ratio(clean_caption_title.lower(), db_caption.lower()) > 90:
-                duplicate_found = True
-                break
-        if duplicate_found:
-            logger.info(f"Skipping duplicate (fuzzy match): {clean_caption_title}")
+        # Check duplicates
+        if await is_duplicate(clean_caption_title):
+            logger.info(f"Skipping duplicate: {clean_caption_title}")
             return
 
-        # ------------------------
-        # IMDb details
-        # ------------------------
-        imdb = await get_movie_details(clean_caption_title)
-        if not imdb or not imdb.get("imdb_url"):
-            logger.info(f"IMDb not found for: {clean_caption_title}")
-            return  # skip sending if IMDb not found
+        # IMDb fetch
+        search_title = re.sub(r"\s[Ss]\d{1,2}[Ee]\d{1,2}", "", clean_caption_title)
+        search_title = re.sub(r"\s\d{4}$", "", search_title).strip()
+        imdb = await get_movie_details(search_title)
+        imdb_link = ""
+        genre = ""
+        if imdb:
+            imdb_link = imdb.get("imdb_url", "")
+            for key in ["genre", "genres", "Genre"]:
+                if key in imdb and imdb[key]:
+                    genre = ", ".join([str(g).strip() for g in imdb[key]]) if isinstance(imdb[key], list) else str(imdb[key]).strip()
+                    break
 
-        imdb_link = imdb.get("imdb_url", "")
-        genre = "Unknown"
-        for key in ["genre", "genres", "Genre"]:
-            if key in imdb and imdb[key]:
-                if isinstance(imdb[key], list):
-                    genre = ", ".join([str(g).strip() for g in imdb[key] if g])
-                else:
-                    genre = str(imdb[key]).strip()
-                break
+        # Languages
+        detected_langs = [lang for lang in CAPTION_LANGUAGES
+                          if re.search(rf"\b{re.escape(lang.lower())}\b", caption.lower()) or
+                             re.search(rf"\b{re.escape(lang.lower())}\b", filename.lower())]
+        language = ", ".join(detected_langs) if detected_langs else "Unknown"
 
-        # ------------------------
-        # Detect languages
-        # ------------------------
-        detected_langs = []
-        for lang in CAPTION_LANGUAGES:
-            if re.search(rf"\b{re.escape(lang.lower())}\b", caption.lower()) or \
-               re.search(rf"\b{re.escape(lang.lower())}\b", filename.lower()):
-                detected_langs.append(lang)
-        seen = set()
-        unique_langs = [l for l in detected_langs if not (l in seen or seen.add(l))]
-        language = ", ".join(unique_langs) if unique_langs else "Unknown"
-
-        # ------------------------
         # Final caption
-        # ------------------------
-        final_caption = (
-            f"<b>✅ {clean_caption_title} {tag}</b>\n\n"
-            f"<blockquote><b>🎙 {language}</b></blockquote>\n\n"
-            f"<b>⭐ <a href='{imdb_link}'>IMDb</a></b>\n"
-            f"<b>📽 Genre:</b> {genre}"
-        )
+        final_caption = f"<b>✅ {clean_caption_title} {tag}</b>\n\n"
+        final_caption += f"<blockquote><b>🎙 {language}</b></blockquote>\n\n"
+        if imdb_link:
+            final_caption += f"<b>⭐ <a href='{imdb_link}'>IMDb</a></b>\n"
+        if genre:
+            final_caption += f"<b>📽 Genre:</b> {genre}"
 
-        # ------------------------
         # Inline button
-        # ------------------------
         btn = [[
             InlineKeyboardButton(
                 "🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑",
@@ -351,9 +341,6 @@ async def send_msg(bot, filename, caption, is_series=False, collection=None):
             )
         ]]
 
-        # ------------------------
-        # Send message
-        # ------------------------
         await bot.send_message(
             chat_id=MOVIE_UPDATE_CHANNEL,
             text=final_caption,
