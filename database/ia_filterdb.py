@@ -233,7 +233,14 @@ def remove_noise_tags(filename: str) -> str:
     for pattern in noise_patterns:
         name = re.sub(pattern, "", name, flags=re.IGNORECASE)
     name = re.sub(r"[._]+", " ", name)
+    name = re.sub(r'\.[^.]+$', '', name)  # remove file extension like .mkv
     return name.strip()
+
+# ------------------------------
+# Detect if file is a TV series
+# ------------------------------
+def is_tv_series(filename: str) -> bool:
+    return bool(re.search(r'[Ss]\d{1,2}[Ee]\d{1,2}', filename))
 
 # ------------------------------
 # Title Cleaning Functions
@@ -241,14 +248,12 @@ def remove_noise_tags(filename: str) -> str:
 def clean_title(filename: str, is_series: bool = False) -> str:
     name = remove_noise_tags(filename)
     if is_series:
-        match = re.match(r"(.+?)\s*[Ss](\d{1,2})(?:[ ._-]?[Ee](\d{1,2}))?", name)
+        match = re.search(r"(.+?)\s*[Ss](\d{1,2})[Ee](\d{1,2})", name)
         if match:
             title = match.group(1).strip()
             season = match.group(2).zfill(2)
-            episode = match.group(3).zfill(2) if match.group(3) else None
-            if episode:
-                return f"{title} S{season}E{episode}"
-            return f"{title} S{season}"
+            episode = match.group(3).zfill(2)
+            return f"{title} S{season}E{episode}"
     else:
         match = re.match(r"(.+?)\s*\(?(\d{4})\)?", name)
         if match:
@@ -259,17 +264,15 @@ def clean_title(filename: str, is_series: bool = False) -> str:
 
 def clean_button_link(filename: str) -> str:
     name = remove_noise_tags(filename)
-    # Series: Title-S01
-    match = re.match(r"(.+?)\s*[Ss](\d{1,2})", name)
-    if match:
-        title = match.group(1).strip().replace(" ", "-")
-        season = match.group(2).zfill(2)
+    match_series = re.search(r"(.+?)\s*[Ss](\d{1,2})", name)
+    if match_series:
+        title = match_series.group(1).strip().replace(" ", "-")
+        season = match_series.group(2).zfill(2)
         return f"{title}-S{season}"
-    # Movie: Title-Year
-    match = re.match(r"(.+?)\s*\(?(\d{4})\)?", name)
-    if match:
-        title = match.group(1).strip().replace(" ", "-")
-        year = match.group(2)
+    match_movie = re.match(r"(.+?)\s*\(?(\d{4})\)?", name)
+    if match_movie:
+        title = match_movie.group(1).strip().replace(" ", "-")
+        year = match_movie.group(2)
         return f"{title}-{year}"
     return name.split()[0].replace(" ", "-")
 
@@ -283,35 +286,29 @@ collection = db[COLLECTION_NAME]
 # ------------------------------
 # Send Message Function (No Poster)
 # ------------------------------
-async def send_msg(bot, filename, caption, is_series=False):
+async def send_msg(bot, filename, caption):
     try:
-        # Clean title and button
-        clean_caption_title = clean_title(filename, is_series)
+        is_series_file = is_tv_series(filename)
+        clean_caption_title = clean_title(filename, is_series_file)
         button_base = clean_button_link(filename)
-        tag = "#𝚃𝚅𝚂𝙴𝚁𝙸𝙴𝚂" if is_series else "#𝙼𝙾𝚅𝙸𝙴"
+        tag = "#𝚃𝚅𝚂𝙴𝚁𝙸𝙴𝚂" if is_series_file else "#𝙼𝙾𝚅𝙸𝙴"
 
         # ✅ Duplicate check using fuzzy matching (read-only)
         recent_files = await collection.find({}, {"file_name": 1, "caption": 1}).to_list(length=1000)
-        duplicate_found = False
         for f in recent_files:
             db_name = f.get("file_name", "") or ""
             db_caption = f.get("caption", "") or ""
             if fuzz.ratio(clean_caption_title.lower(), db_name.lower()) > 90 or \
                fuzz.ratio(clean_caption_title.lower(), db_caption.lower()) > 90:
-                duplicate_found = True
-                break
-
-        if duplicate_found:
-            logging.info(f"Skipping duplicate (fuzzy match): {clean_caption_title}")
-            return
+                logging.info(f"Skipping duplicate (fuzzy match): {clean_caption_title}")
+                return
 
         # IMDb details
         imdb = await get_movie_details(clean_caption_title)
         genre = "Unknown"
         imdb_link = ""
-        if imdb:
-            if "imdb_url" in imdb:
-                imdb_link = imdb["imdb_url"]
+        if imdb and "imdb_url" in imdb:
+            imdb_link = imdb["imdb_url"]
             if "genre" in imdb:
                 genre = ", ".join(imdb["genre"]) if isinstance(imdb["genre"], list) else imdb["genre"]
             elif "genres" in imdb:
@@ -329,13 +326,12 @@ async def send_msg(bot, filename, caption, is_series=False):
         unique_langs = [l for l in detected_langs if not (l in seen or seen.add(l))]
         language = ", ".join(unique_langs) if unique_langs else "Unknown"
 
-        # Final caption
-        final_caption = (
-            f"<b>✅ {clean_caption_title} {tag}</b>\n\n"
-            f"<blockquote><b>🎙 {language}</b></blockquote>\n\n"
-            f"<b>⭐ <a href='{imdb_link}'>IMDb</a></b>\n"
-            f"<b>📽 Genre:</b> {genre}"
-        )
+        # Build final caption
+        final_caption = f"<b>✅ {clean_caption_title} {tag}</b>\n\n"
+        final_caption += f"<blockquote><b>🎙 {language}</b></blockquote>\n\n"
+        if imdb_link:
+            final_caption += f"<b>⭐ <a href='{imdb_link}'>IMDb</a></b>\n"
+        final_caption += f"<b>📽 Genre:</b> {genre}"
 
         # Inline button
         btn = [[
@@ -345,7 +341,7 @@ async def send_msg(bot, filename, caption, is_series=False):
             )
         ]]
 
-        # Send message only (no poster)
+        # Send message
         await bot.send_message(
             chat_id=MOVIE_UPDATE_CHANNEL,
             text=final_caption,
