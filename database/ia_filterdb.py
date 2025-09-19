@@ -17,6 +17,7 @@ from .Imdbposter import get_movie_details, fetch_image
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from PIL import Image
 from rapidfuzz import fuzz
+from motor.motor_asyncio import AsyncIOMotorClient
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -273,15 +274,23 @@ def clean_button_link(filename: str) -> str:
     return name.split()[0].replace(" ", "-")
 
 # ------------------------------
+# Initialize MongoDB collection
+# ------------------------------
+mongo_client = AsyncIOMotorClient(DATABASE_URI)
+db = mongo_client[DATABASE_NAME]
+collection = db[COLLECTION_NAME]
+
+# ------------------------------
 # Send Message Function (No Poster)
 # ------------------------------
 async def send_msg(bot, filename, caption, is_series=False):
     try:
+        # Clean title and button
         clean_caption_title = clean_title(filename, is_series)
         button_base = clean_button_link(filename)
         tag = "#𝚃𝚅𝚂𝙴𝚁𝙸𝙴𝚂" if is_series else "#𝙼𝙾𝚅𝙸𝙴"
 
-        # ✅ Duplicate check using fuzzy matching (read-only, does not alter DB)
+        # ✅ Duplicate check using fuzzy matching (read-only)
         recent_files = await collection.find({}, {"file_name": 1, "caption": 1}).to_list(length=1000)
         duplicate_found = False
         for f in recent_files:
