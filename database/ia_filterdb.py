@@ -223,22 +223,24 @@ def unpack_new_file_id(new_file_id):
     file_ref = encode_file_ref(decoded.file_reference)
     return file_id, file_ref
 
-# -------------------------
-# Deterministic langdetect
-# -------------------------
-DetectorFactory.seed = 0
 
 # -------------------------
-# Universal language detection
+# Episode Range Formatter
 # -------------------------
-def detect_languages(filename: str, caption: str = ""):
-    text = (filename + " " + caption).replace(".", " ").replace("_", " ")
-    try:
-        langs_probs = detect_langs(text)
-        langs = [lp.lang.capitalize() for lp in langs_probs if lp.prob > 0.1]
-        return langs if langs else ["Unknown"]
-    except:
-        return ["Unknown"]
+def format_episode_ranges(episodes):
+    nums = sorted(set(int(ep) for ep in episodes if str(ep).isdigit()))
+    if not nums:
+        return ""
+    ranges = []
+    start = prev = nums[0]
+    for n in nums[1:]:
+        if n == prev + 1:
+            prev = n
+        else:
+            ranges.append(f"{start:02d}" if start == prev else f"{start:02d}–{prev:02d}")
+            start = prev = n
+    ranges.append(f"{start:02d}" if start == prev else f"{start:02d}–{prev:02d}")
+    return ", ".join(ranges)
 
 # -------------------------
 # Title cleaner and type detection
@@ -251,83 +253,140 @@ def clean_title(filename: str):
         title = match.group(1).strip()
         season = match.group(2).zfill(2)
         episode = match.group(3).zfill(2)
-        return f"{title} S{season}", True, episode
+        return f"{title} S{season}", True, season, episode
     # TV series with season only
     match = re.match(r"(.+?)\s[Ss](\d{1,2})", name)
     if match:
         title = match.group(1).strip()
         season = match.group(2).zfill(2)
-        return f"{title} S{season}", True, None
+        return f"{title} S{season}", True, season, None
     # Movie
     match = re.match(r"(.+?)\s*\(?(\d{4})\)?", name)
     if match:
         title = match.group(1).strip()
-        return f"{title} {match.group(2)}", False, None
-    return name.strip(), False, None
+        return f"{title} {match.group(2)}", False, None, None
+    return name.strip(), False, None, None
 
 # -------------------------
-# Example IMDb fetch function (replace with your actual async function)
+# Automatic language detection
 # -------------------------
-async def get_movie_details(title: str):
-    # Dummy example for testing
-    return {
-        "imdb_url": f"https://www.imdb.com/title/tt0000000",
-        "genre": ["Action", "Drama", "Mystery"]
-    }
+def detect_languages(filename: str, caption: str = ""):
+    text_to_scan = (filename + " " + caption).lower()
+    matches = re.findall(r'\b[a-zA-Z]{2,15}\b', text_to_scan)
+    langs = list(set([w.capitalize() for w in matches]))
+    return langs if langs else ["Unknown"]
 
 # -------------------------
-# Main send_msg function
+# Send message logic
 # -------------------------
-async def send_msg(bot: Client, filename: str, caption: str = ""):
+async def send_msg(bot: Client, filename: str, caption: str = "", MOVIE_UPDATE_CHANNEL=None, db=None, get_movie_details=None):
     try:
-        clean_caption_title, is_series, season_episode = clean_title(filename)
+        sent_messages = db["sent_messages"]
+
+        clean_caption_title, is_series, season, episode = clean_title(filename)
         tag = "#𝚃𝚅𝚂𝙴𝚁𝙸𝙴𝚂" if is_series else "#𝙼𝙾𝚅𝙸𝙴"
 
-        # For movies: check if any file with the same cleaned title exists
-        existing_file = await Media.find_one({"file_name": {"$regex": clean_caption_title, "$options": "i"}})
-
-        # For series: check if the same season already exists
-        if is_series and season_episode:
-            season_match = re.search(r"S(\d{2})", clean_caption_title)
-            if season_match:
-                season_num = season_match.group(1)
-                existing_file = await Media.find_one({
-                    "file_name": {"$regex": f"{clean_caption_title}", "$options": "i"},
-                    "file_name": {"$regex": f"S{season_num}", "$options": "i"}
-                })
-
-        if existing_file:
-            logger.info(f"⏩ Duplicate found: {clean_caption_title} → skipping")
-            return
-
-
-        # -------------------------
-        # Detect languages automatically
-        # -------------------------
         detected_langs = detect_languages(filename, caption)
         language = ", ".join(detected_langs)
 
-        # -------------------------
-        # Fetch IMDb data
-        # -------------------------
+        # IMDb fetch
         search_title = re.sub(r"\s[Ss]\d{1,2}", "", clean_caption_title)
         search_title = re.sub(r"\s\d{4}$", "", search_title).strip()
-        imdb_data = await get_movie_details(search_title)
+        imdb_data = await get_movie_details(search_title) if get_movie_details else None
         imdb_link, genre = "", "Unknown"
         if imdb_data:
             imdb_link = imdb_data.get("imdb_url", "")
             for key in ["genre", "genres", "Genre"]:
                 if key in imdb_data and imdb_data[key]:
-                    raw_genre = imdb_data[key]
-                    if isinstance(raw_genre, list):
-                        genre = ", ".join([str(g).strip() for g in raw_genre])
-                    else:
-                        genre = str(raw_genre).strip()
+                    genre = ", ".join([str(g).strip() for g in imdb_data[key]]) if isinstance(imdb_data[key], list) else str(imdb_data[key]).strip()
                     break
 
+        now = datetime.datetime.utcnow()
+
         # -------------------------
-        # Prepare caption
+        # SERIES
         # -------------------------
+        if is_series:
+            existing = await sent_messages.find_one({
+                "title": clean_caption_title,
+                "season": season
+            })
+
+            if existing:
+                episodes = existing.get("episodes", [])
+                last_update = existing.get("last_update", now)
+
+                if episode in episodes:
+                    logger.info(f"[TV] Duplicate episode {episode} for {clean_caption_title} | Skipping")
+                    return
+
+                time_diff = (now - last_update).total_seconds() / 60
+                if time_diff <= 10:
+                    episodes.append(episode)
+                    episodes = sorted(list(set(episodes)))
+                    final_caption = f"<b>✅ {clean_caption_title} {tag}</b>\n\n"
+                    final_caption += f"<blockquote><b>🎙 {language}</b></blockquote>\n"
+                    final_caption += f"<blockquote><b>📺 Episodes:</b> {format_episode_ranges(episodes)}</blockquote>\n\n"
+                    if imdb_link:
+                        final_caption += f"<b>⭐ <a href='{imdb_link}'>IMDb</a></b>\n"
+                    if genre:
+                        final_caption += f"<b>📽 Genre:</b> {genre}"
+
+                    await bot.edit_message_text(
+                        chat_id=MOVIE_UPDATE_CHANNEL,
+                        message_id=existing["msg_id"],
+                        text=final_caption,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                            "🔍 Click to Search",
+                            url=f"https://telegram.me/{bot.me.username}?start=getfile-{clean_caption_title.replace(' ', '-')}"
+                        )]])
+                    )
+
+                    await sent_messages.update_one(
+                        {"_id": existing["_id"]},
+                        {"$set": {"episodes": episodes, "last_update": now}}
+                    )
+                    logger.info(f"[TV] Merged new episode {episode} into {clean_caption_title}")
+                    return
+
+            # Send new message for series
+            final_caption = f"<b>✅ {clean_caption_title} {tag}</b>\n\n"
+            final_caption += f"<blockquote><b>🎙 {language}</b></blockquote>\n"
+            if episode:
+                final_caption += f"<blockquote><b>📺 Episodes:</b> {episode}</blockquote>\n\n"
+            if imdb_link:
+                final_caption += f"<b>⭐ <a href='{imdb_link}'>IMDb</a></b>\n"
+            if genre:
+                final_caption += f"<b>📽 Genre:</b> {genre}"
+
+            msg = await bot.send_message(
+                chat_id=MOVIE_UPDATE_CHANNEL,
+                text=final_caption,
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                    "🔍 Click to Search",
+                    url=f"https://telegram.me/{bot.me.username}?start=getfile-{clean_caption_title.replace(' ', '-')}"
+                )]])
+            )
+
+            await sent_messages.insert_one({
+                "title": clean_caption_title,
+                "season": season,
+                "episodes": [episode] if episode else [],
+                "msg_id": msg.message_id,
+                "last_update": datetime.datetime.utcnow()
+            })
+            return
+
+        # -------------------------
+        # MOVIE
+        # -------------------------
+        existing = await sent_messages.find_one({"title": clean_caption_title})
+        if existing:
+            logger.info(f"[MOVIE] {clean_caption_title} already sent | Skipping")
+            return
+
         final_caption = f"<b>✅ {clean_caption_title} {tag}</b>\n\n"
         final_caption += f"<blockquote><b>🎙 {language}</b></blockquote>\n\n"
         if imdb_link:
@@ -335,24 +394,24 @@ async def send_msg(bot: Client, filename: str, caption: str = ""):
         if genre:
             final_caption += f"<b>📽 Genre:</b> {genre}"
 
-        # -------------------------
-        # Send message
-        # -------------------------
-        await bot.send_message(
+        msg = await bot.send_message(
             chat_id=MOVIE_UPDATE_CHANNEL,
             text=final_caption,
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
-                "🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑",
+                "🔍 Click to Search",
                 url=f"https://telegram.me/{bot.me.username}?start=getfile-{clean_caption_title.replace(' ', '-')}"
             )]])
         )
 
-        logger.info(f"[NEW] Sent message for {clean_caption_title}")
+        await sent_messages.insert_one({
+            "title": clean_caption_title,
+            "msg_id": msg.message_id,
+            "last_update": datetime.datetime.utcnow()
+        })
 
     except Exception as e:
         logger.error(f"❌ Error in send_msg: {e}")
-
 
         
 async def get_qualities(text, qualities: list):
