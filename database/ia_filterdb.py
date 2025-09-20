@@ -223,7 +223,7 @@ def unpack_new_file_id(new_file_id):
     file_ref = encode_file_ref(decoded.file_reference)
     return file_id, file_ref
 
-# -------------------------
+-------------------------
 # Episode formatter
 # -------------------------
 def format_episode_ranges(episodes):
@@ -282,11 +282,12 @@ async def send_msg(bot: Client, filename: str, caption: str = "", db=None):
     try:
         sent_messages = db["sent_messages"]
 
+        logger.info(f"[DEBUG] Processing file: {filename}, caption: {caption}")
+
         clean_caption_title, is_series, season, episode = clean_title(filename)
-        logger.info(f"Processing: {filename} -> {clean_caption_title}, Series: {is_series}, Season: {season}, Episode: {episode}")
+        logger.info(f"[DEBUG] Parsed title: {clean_caption_title}, Series: {is_series}, Season: {season}, Episode: {episode}")
 
         tag = "#𝚃𝚅𝚂𝙴𝚁𝙸𝙴𝚂" if is_series else "#𝙼𝙾𝚅𝙸𝙴"
-
         language = ", ".join(detect_languages(filename, caption))
 
         # IMDb fetch
@@ -313,9 +314,8 @@ async def send_msg(bot: Client, filename: str, caption: str = "", db=None):
                 episodes = existing.get("episodes", [])
                 last_update = existing.get("last_update", now)
 
-                # If same episode already exists, skip
                 if episode in episodes:
-                    logger.info(f"[TV] Duplicate episode {episode} for {clean_caption_title} | Skipping")
+                    logger.info(f"[SKIP] Episode {episode} already exists for {clean_caption_title} S{season}")
                     return
 
                 # Merge episodes within 10 minutes
@@ -346,7 +346,7 @@ async def send_msg(bot: Client, filename: str, caption: str = "", db=None):
                         {"_id": existing["_id"]},
                         {"$set": {"episodes": episodes, "last_update": now}}
                     )
-                    logger.info(f"[TV] Merged new episode {episode} into {clean_caption_title}")
+                    logger.info(f"[MERGE] Added episode {episode} to {clean_caption_title} S{season}")
                     return
 
             # Send new message for series
@@ -376,6 +376,7 @@ async def send_msg(bot: Client, filename: str, caption: str = "", db=None):
                 "msg_id": msg.message_id,
                 "last_update": now
             })
+            logger.info(f"[SEND] Sent new series message for {clean_caption_title} S{season}")
             return
 
         # -------------------------
@@ -383,7 +384,7 @@ async def send_msg(bot: Client, filename: str, caption: str = "", db=None):
         # -------------------------
         existing = await sent_messages.find_one({"title": clean_caption_title})
         if existing:
-            logger.info(f"[MOVIE] {clean_caption_title} already sent | Skipping")
+            logger.info(f"[SKIP] Movie {clean_caption_title} already sent")
             return
 
         final_caption = f"<b>✅ {clean_caption_title} {tag}</b>\n\n"
@@ -408,6 +409,7 @@ async def send_msg(bot: Client, filename: str, caption: str = "", db=None):
             "msg_id": msg.message_id,
             "last_update": now
         })
+        logger.info(f"[SEND] Sent new movie message for {clean_caption_title}")
 
     except Exception as e:
         logger.error(f"❌ Error in send_msg: {e}")
