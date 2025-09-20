@@ -223,9 +223,8 @@ def unpack_new_file_id(new_file_id):
     file_ref = encode_file_ref(decoded.file_reference)
     return file_id, file_ref
 
-
 # -------------------------
-# Episode Range Formatter
+# Episode formatter
 # -------------------------
 def format_episode_ranges(episodes):
     nums = sorted(set(int(ep) for ep in episodes if str(ep).isdigit()))
@@ -243,7 +242,7 @@ def format_episode_ranges(episodes):
     return ", ".join(ranges)
 
 # -------------------------
-# Title cleaner and type detection
+# Title parser
 # -------------------------
 def clean_title(filename: str):
     name = re.sub(r"[._]+", " ", filename)
@@ -277,22 +276,23 @@ def detect_languages(filename: str, caption: str = ""):
     return langs if langs else ["Unknown"]
 
 # -------------------------
-# Send message logic
+# Main send message
 # -------------------------
-async def send_msg(bot: Client, filename: str, caption: str = "", MOVIE_UPDATE_CHANNEL=None, db=None, get_movie_details=None):
+async def send_msg(bot: Client, filename: str, caption: str = "", db=None):
     try:
         sent_messages = db["sent_messages"]
 
         clean_caption_title, is_series, season, episode = clean_title(filename)
+        logger.info(f"Processing: {filename} -> {clean_caption_title}, Series: {is_series}, Season: {season}, Episode: {episode}")
+
         tag = "#𝚃𝚅𝚂𝙴𝚁𝙸𝙴𝚂" if is_series else "#𝙼𝙾𝚅𝙸𝙴"
 
-        detected_langs = detect_languages(filename, caption)
-        language = ", ".join(detected_langs)
+        language = ", ".join(detect_languages(filename, caption))
 
         # IMDb fetch
         search_title = re.sub(r"\s[Ss]\d{1,2}", "", clean_caption_title)
         search_title = re.sub(r"\s\d{4}$", "", search_title).strip()
-        imdb_data = await get_movie_details(search_title) if get_movie_details else None
+        imdb_data = await get_movie_details(search_title)
         imdb_link, genre = "", "Unknown"
         if imdb_data:
             imdb_link = imdb_data.get("imdb_url", "")
@@ -307,19 +307,18 @@ async def send_msg(bot: Client, filename: str, caption: str = "", MOVIE_UPDATE_C
         # SERIES
         # -------------------------
         if is_series:
-            existing = await sent_messages.find_one({
-                "title": clean_caption_title,
-                "season": season
-            })
+            existing = await sent_messages.find_one({"title": clean_caption_title, "season": season})
 
             if existing:
                 episodes = existing.get("episodes", [])
                 last_update = existing.get("last_update", now)
 
+                # If same episode already exists, skip
                 if episode in episodes:
                     logger.info(f"[TV] Duplicate episode {episode} for {clean_caption_title} | Skipping")
                     return
 
+                # Merge episodes within 10 minutes
                 time_diff = (now - last_update).total_seconds() / 60
                 if time_diff <= 10:
                     episodes.append(episode)
@@ -375,7 +374,7 @@ async def send_msg(bot: Client, filename: str, caption: str = "", MOVIE_UPDATE_C
                 "season": season,
                 "episodes": [episode] if episode else [],
                 "msg_id": msg.message_id,
-                "last_update": datetime.datetime.utcnow()
+                "last_update": now
             })
             return
 
@@ -407,7 +406,7 @@ async def send_msg(bot: Client, filename: str, caption: str = "", MOVIE_UPDATE_C
         await sent_messages.insert_one({
             "title": clean_caption_title,
             "msg_id": msg.message_id,
-            "last_update": datetime.datetime.utcnow()
+            "last_update": now
         })
 
     except Exception as e:
