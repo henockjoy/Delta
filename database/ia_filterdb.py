@@ -224,7 +224,6 @@ def unpack_new_file_id(new_file_id):
     file_ref = encode_file_ref(decoded.file_reference)
     return file_id, file_ref
 
-DetectorFactory.seed = 0  # for deterministic results
 
 # -------------------------
 # Helper: Episode Range Formatter
@@ -249,17 +248,20 @@ def format_episode_ranges(episodes):
 # -------------------------
 def clean_title(filename: str):
     name = re.sub(r"[._]+", " ", filename)
+    # TV series with episode
     match = re.match(r"(.+?)\s[Ss](\d{1,2})[Ee](\d{1,2})", name)
     if match:
         title = match.group(1).strip()
         season = match.group(2).zfill(2)
         episode = match.group(3).zfill(2)
         return f"{title} S{season}", True, episode
+    # TV series with season only
     match = re.match(r"(.+?)\s[Ss](\d{1,2})", name)
     if match:
         title = match.group(1).strip()
         season = match.group(2).zfill(2)
         return f"{title} S{season}", True, None
+    # Movie
     match = re.match(r"(.+?)\s*\(?(\d{4})\)?", name)
     if match:
         title = match.group(1).strip()
@@ -267,42 +269,24 @@ def clean_title(filename: str):
     return name.strip(), False, None
 
 # -------------------------
-# Detect languages from filename and caption
+# Automatic language detection
 # -------------------------
-IGNORE_WORDS = ["dual", "multi", "esub", "web", "dl", "nf", "hdrip", "hevc",
-                "bit", "x264", "aac", "mkv", "mp4", "1080p", "720p", "480p",
-                "hq", "we", "the", "and", "of"]
-
 def detect_languages(filename: str, caption: str = ""):
-    text_to_scan = filename + " " + caption
-    found_languages = set()
-
-    # Step 1: Detect explicit language mentions (e.g., "Hindi", "Tamil")
-    explicit_langs = re.findall(r"\b[A-Za-z]+\b", text_to_scan)
-    for lang in explicit_langs:
-        if lang.lower() not in [w.lower() for w in IGNORE_WORDS]:
-            found_languages.add(lang)
-
-    # Step 2: Use langdetect for other textual content
-    clean_text = text_to_scan
-    for word in IGNORE_WORDS:
-        clean_text = re.sub(rf"\b{word}\b", "", clean_text, flags=re.IGNORECASE)
-    clean_text = clean_text.strip()
-    if clean_text:
-        try:
-            detected = detect_langs(clean_text)
-            for d in detected:
-                if d.prob > 0.5:
-                    found_languages.add(d.lang)
-        except:
-            pass
-
-    return list(found_languages) or ["Unknown"]
+    text = filename + " " + caption
+    # Remove digits and punctuation, keep letters (Unicode friendly)
+    clean_text = " ".join(re.findall(r'\b\w+\b', text))
+    if not clean_text.strip():
+        return ["Unknown"]
+    try:
+        langs = detect_langs(clean_text)
+        return [str(lang.lang).capitalize() for lang in langs]
+    except:
+        return ["Unknown"]
 
 # -------------------------
 # Send message logic
 # -------------------------
-async def send_msg(bot: Client, filename: str, caption: str = ""):
+async def send_msg(bot: Client, filename: str, caption=""):
     try:
         clean_caption_title, is_series, episode = clean_title(filename)
         today = datetime.date.today().isoformat()
