@@ -224,10 +224,10 @@ def unpack_new_file_id(new_file_id):
     file_ref = encode_file_ref(decoded.file_reference)
     return file_id, file_ref
 
-# TTL index for temporary storage (1 day)
+# TTL index for temporary storage (10 minutes for merging)
 async def init_indexes():
     try:
-        await sent_messages.create_index("created_at", expireAfterSeconds=86400)
+        await sent_messages.create_index("created_at", expireAfterSeconds=600)
         logger.info("✅ TTL index created on sent_messages")
     except Exception as e:
         logger.warning(f"⚠️ Index creation failed (maybe exists): {e}")
@@ -276,48 +276,66 @@ def clean_title(filename: str):
     return name.strip(), False, None
 
 # -------------------------
-# Automatic language detection
+# Language detection from filename + caption
 # -------------------------
 def detect_languages(filename: str, caption: str = ""):
-    text_to_scan = filename + " " + caption
-    # Match capitalized words or known language words
-    matches = re.findall(r'\b[A-Z][a-z]{1,15}\b', text_to_scan)
-    langs = list(set(matches))
-    return langs if langs else ["Unknown"]
+    text_to_scan = f"{filename} {caption}"
+
+    # Split words
+    words = re.split(r"[\s\[\]\(\)\-_,.]+", text_to_scan)
+
+    langs = []
+    for word in words:
+        word_clean = word.strip()
+        # Exclude generic "multi", "dual", "dubbed"
+        if word_clean.lower() in ["multi", "dual", "dubbed"]:
+            continue
+        # Append any non-empty word as detected language
+        if word_clean:
+            langs.append(word_clean)
+
+    # Deduplicate while keeping order
+    langs = list(dict.fromkeys(langs))
+    return langs or ["Unknown"]
 
 # -------------------------
 # Send message logic
 # -------------------------
-async def send_msg(bot: Client, filename: str, caption: str = ""):
+async def send_msg(bot: Client, filename: str, caption=""):
     try:
         clean_caption_title, is_series, episode = clean_title(filename)
-        today = datetime.date.today().isoformat()
+        today = datetime.datetime.utcnow().date().isoformat()
         tag = "#𝚃𝚅𝚂𝙴𝚁𝙸𝙴𝚂" if is_series else "#𝙼𝙾𝚅𝙸𝙴"
 
-        # Auto-detect languages
+        # Detect languages
         detected_langs = detect_languages(filename, caption)
         language = ", ".join(detected_langs)
 
         # IMDb fetch
         search_title = re.sub(r"\s[Ss]\d{1,2}", "", clean_caption_title)
         search_title = re.sub(r"\s\d{4}$", "", search_title).strip()
-        imdb_data = await get_movie_details(search_title)
-        imdb_link, genre = "", "Unknown"
-        if imdb_data:
-            imdb_link = imdb_data.get("imdb_url", "")
+        imdb_link, genre = "", ""
+        imdb = await get_movie_details(search_title)
+        if imdb:
+            imdb_link = imdb.get("imdb_url", "")
             for key in ["genre", "genres", "Genre"]:
-                if key in imdb_data and imdb_data[key]:
-                    genre = ", ".join([str(g).strip() for g in imdb_data[key]]) if isinstance(imdb_data[key], list) else str(imdb_data[key]).strip()
+                if key in imdb and imdb[key]:
+                    genre = ", ".join([str(g).strip() for g in imdb[key]]) if isinstance(imdb[key], list) else str(imdb[key]).strip()
                     break
 
         # -------------------------
         # TV SERIES
         # -------------------------
         if is_series:
-            existing = await sent_messages.find_one({"title": clean_caption_title, "date": today})
+            existing = await sent_messages.find_one({
+                "title": clean_caption_title,
+                "season": clean_caption_title.split("S")[-1],
+                "date": today
+            })
+
             if existing:
                 episodes = existing.get("episodes", [])
-                if episode:
+                if episode and episode not in episodes:
                     episodes.append(episode)
                 episodes = list(set(episodes))
                 logger.info(f"[TV] Updating {clean_caption_title} | Episodes: {format_episode_ranges(episodes)}")
@@ -336,10 +354,12 @@ async def send_msg(bot: Client, filename: str, caption: str = ""):
                         message_id=existing["msg_id"],
                         text=final_caption,
                         parse_mode=ParseMode.HTML,
-                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
-                            "🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑",
-                            url=f"https://telegram.me/{bot.me.username}?start=getfile-{clean_caption_title.replace(' ', '-')}"
-                        )]])
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton(
+                                "🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑",
+                                url=f"https://telegram.me/{bot.me.username}?start=getfile-{clean_caption_title.replace(' ', '-')}"
+                            )
+                        ]])
                     )
                 except Exception as e:
                     logger.error(f"Edit failed: {e}")
@@ -348,6 +368,7 @@ async def send_msg(bot: Client, filename: str, caption: str = ""):
                     {"_id": existing["_id"]},
                     {"$set": {"episodes": episodes, "created_at": datetime.datetime.utcnow()}}
                 )
+
             else:
                 logger.info(f"[TV] Sending new message for {clean_caption_title} | Episode: {episode}")
 
@@ -364,14 +385,17 @@ async def send_msg(bot: Client, filename: str, caption: str = ""):
                     chat_id=MOVIE_UPDATE_CHANNEL,
                     text=final_caption,
                     parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
-                        "🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑",
-                        url=f"https://telegram.me/{bot.me.username}?start=getfile-{clean_caption_title.replace(' ', '-')}"
-                    )]])
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑",
+                                url=f"https://telegram.me/{bot.me.username}?start=getfile-{clean_caption_title.replace(' ', '-')}"
+                            )
+                    ]])
                 )
 
                 await sent_messages.insert_one({
                     "title": clean_caption_title,
+                    "season": clean_caption_title.split("S")[-1] if is_series else None,
                     "msg_id": msg.message_id,
                     "date": today,
                     "episodes": [episode] if episode else [],
@@ -393,7 +417,7 @@ async def send_msg(bot: Client, filename: str, caption: str = ""):
             final_caption = f"<b>✅ {clean_caption_title} {tag}</b>\n\n"
             final_caption += f"<blockquote><b>🎙 {language}</b></blockquote>\n\n"
             if imdb_link:
-                final_caption += f"<b>⭐ <a href='{imdb_link}'>IMDb</a></b>\n"
+                final_caption += f"<b>⭐ <a href='{imdb_link}'>IMDb</a></b>\n\n"
             if genre:
                 final_caption += f"<b>📽 Genre:</b> {genre}"
 
@@ -401,10 +425,12 @@ async def send_msg(bot: Client, filename: str, caption: str = ""):
                 chat_id=MOVIE_UPDATE_CHANNEL,
                 text=final_caption,
                 parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
-                    "🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑",
-                    url=f"https://telegram.me/{bot.me.username}?start=getfile-{clean_caption_title.replace(' ', '-')}"
-                )]])
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑",
+                        url=f"https://telegram.me/{bot.me.username}?start=getfile-{clean_caption_title.replace(' ', '-')}"
+                    )
+                ]])
             )
 
             await sent_messages.insert_one({
@@ -416,7 +442,6 @@ async def send_msg(bot: Client, filename: str, caption: str = ""):
 
     except Exception as e:
         logger.error(f"❌ Error in send_msg: {e}")
-
         
 async def get_qualities(text, qualities: list):
     """Get all Quality from text"""
