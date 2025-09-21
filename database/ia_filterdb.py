@@ -229,7 +229,7 @@ async def schedule_series_batch(bot, series_key, display_name, language, genres)
     episode_batch.pop(series_key, None)  # clear batch
     batch_tasks.pop(series_key, None)    # clear task
 
-    episodes_line = f"<b>📽 Episodes:<b> {', '.join(episodes)}\n\n"
+    episodes_line = f"<b>📽 Episodes:</b> {', '.join(episodes)}\n\n"
     text = f"<b>✅{display_name} #𝖳𝖵𝖲𝖤𝖱𝖨𝖤𝖲</b>\n\n"
     text += f"<blockquote><b>🎙 {language}</b></blockquote>\n"
     text += episodes_line
@@ -311,9 +311,11 @@ async def send_msg(bot, filename, caption):
                 episode_batch[series_key].append("E??")
 
             if series_key not in batch_tasks:
-                batch_tasks[series_key] = asyncio.create_task(
-                    schedule_series_batch(bot, series_key, series_key, language, genres)
-                )
+               display_name = f"{clean_name} S{season.zfill(2)}"  # only once
+               batch_tasks[series_key] = asyncio.create_task(
+                   schedule_series_batch(bot, series_key, display_name, language, genres)
+               )
+
             return  # don't send immediately
 
         # Movies → send immediately
