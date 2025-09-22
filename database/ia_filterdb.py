@@ -26,7 +26,7 @@ tempDict = {'indexDB': DATABASE_URI}
 client = AsyncIOMotorClient(DATABASE_URI)
 db = client[DATABASE_NAME]
 instance = Instance.from_db(db)
-sent_messages = db["sent_messages"]    # Temporary tracker for duplicates
+sent_collection = db['sent_files']  # collection for storing sent movies/series
 
 
 # Primary DB Model
@@ -222,20 +222,21 @@ def unpack_new_file_id(new_file_id):
 # ------------------------------
 episode_batch = defaultdict(list)
 batch_tasks = {}
+series_languages = defaultdict(set)
 
 # ------------------------------
 # Sanitize for button link
 # ------------------------------
 def sanitize_for_url(name: str) -> str:
-    name = re.sub(r"[()\[\]{}:;'\.!]", "", name)  # remove unwanted symbols
-    name = name.replace(" ", "-")  # replace spaces with -
+    name = re.sub(r"[()\[\]{}:;'\.!]", "", name)
+    name = name.replace(" ", "-")
     return name
 
 # ------------------------------
 # Convert list of episodes to ranges E01-E03
 # ------------------------------
 def episodes_to_ranges(episodes):
-    sorted_eps = sorted(int(e[1:]) for e in episodes)  # remove 'E' prefix
+    sorted_eps = sorted(int(e[1:]) for e in episodes)
     ranges = []
     start = prev = sorted_eps[0]
 
@@ -249,7 +250,6 @@ def episodes_to_ranges(episodes):
                 ranges.append(f"E{start:02d}–E{prev:02d}")
             start = prev = num
 
-    # last range
     if start == prev:
         ranges.append(f"E{start:02d}")
     else:
@@ -260,24 +260,39 @@ def episodes_to_ranges(episodes):
 # ------------------------------
 # Schedule batch for series episodes
 # ------------------------------
-async def schedule_series_batch(series_key, clean_name, season, language, genres, bot, message):
-    await asyncio.sleep(10)  # delay to collect multiple episodes
+async def schedule_series_batch(series_key, clean_name, season, language, caption, bot, message):
+    await asyncio.sleep(10)
     episodes = episode_batch.pop(series_key, [])
+    languages = series_languages.pop(series_key, set())
     batch_tasks.pop(series_key, None)
 
     if not episodes:
         return
 
-    # ✅ deduplicate episodes
+    # MongoDB duplication check
+    existing = await sent_collection.find_one({"key": series_key, "type": "series"})
+    if existing:
+        return
+    await sent_collection.insert_one({"key": series_key, "type": "series"})
+
+    # Deduplicate and sort
     episodes = sorted(set(episodes))
     episode_text = episodes_to_ranges(episodes)
 
-    text = f"<b>✅{series_key} #𝚃𝚅𝚂𝙴𝚁𝙸𝙴𝚂</b>\n\n"
-    text += f"<blockquote><b>🎙{language}</b></blockquote>\n"
+    # Detect genres inline like before
+    genres = ""
+    for g in CAPTION_LANGUAGES:
+        if g.lower() in caption.lower():
+            genres += f"{g}, "
+    genres = genres[:-2] if genres else "🤔 Unknown 😄"
+
+    language_text = ", ".join(sorted(languages)) if languages else "🤔 Unknown 😄"
+
+    text = f"<b>✅ {series_key} #𝚃𝚅𝚂𝙴𝚁𝙸𝙴𝚂</b>\n\n"
+    text += f"<blockquote><b>🎙 {language_text}</b></blockquote>\n"
     text += f"<b>📽 Episodes:</b> <code>{episode_text}</code>\n\n"
     text += f"<b>📽 Genre:</b> {genres}"
 
-    # button with sanitized series_key
     btn = [[InlineKeyboardButton(
         '🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑',
         url=f"https://telegram.me/{temp.U_NAME}?start=getfile-{sanitize_for_url(series_key)}"
@@ -289,9 +304,8 @@ async def schedule_series_batch(series_key, clean_name, season, language, genres
 # ------------------------------
 # Handle new file
 # ------------------------------
-async def handle_new_file(bot, message, filename, caption, language, genres):
+async def handle_new_file(bot, message, filename, caption, language):
     try:
-        # Clean name
         clean_name = re.sub(r'\(\@\S+\)|\[\@\S+\]|\b@\S+|\bwww\.\S+', '', filename).strip()
 
         # Detect series pattern
@@ -299,23 +313,38 @@ async def handle_new_file(bot, message, filename, caption, language, genres):
         if series_match:
             season = series_match.group(1)
             episode = series_match.group(2)
-
-            # ✅ separate batch per season
             series_key = f"{clean_name} S{season.zfill(2)}"
-            episode_batch[series_key].append(f"E{episode.zfill(2)}")
 
-            # schedule batching if not already running
+            # Deduplicate in MongoDB
+            existing_series = await sent_collection.find_one({"key": series_key, "type": "series"})
+            if existing_series and f"E{episode.zfill(2)}" in episode_batch.get(series_key, []):
+                return
+
+            episode_batch[series_key].append(f"E{episode.zfill(2)}")
+            series_languages[series_key].add(language)
+
             if series_key not in batch_tasks:
                 batch_tasks[series_key] = asyncio.create_task(
-                    schedule_series_batch(series_key, clean_name, season, language, genres, bot, message)
+                    schedule_series_batch(series_key, clean_name, season, language, caption, bot, message)
                 )
         else:
-            # Movie case
-            text = f"<b>✅{clean_name} #𝙼𝙾𝚅𝙸𝙴</b>\n\n"
+            # Movie duplication check
+            existing_movie = await sent_collection.find_one({"key": clean_name, "type": "movie"})
+            if existing_movie:
+                return
+            await sent_collection.insert_one({"key": clean_name, "type": "movie"})
+
+            # Detect genres inline like before
+            genres = ""
+            for g in CAPTION_LANGUAGES:
+                if g.lower() in caption.lower():
+                    genres += f"{g}, "
+            genres = genres[:-2] if genres else "🤔 Unknown 😄"
+
+            text = f"<b>✅ {clean_name} #𝙼𝙾𝚅𝙸𝙴</b>\n\n"
             text += f"<blockquote><b>🎙 {language}</b></blockquote>\n"
             text += f"<b>📽 Genre:</b> {genres}"
 
-            # button with sanitized clean_name
             btn = [[InlineKeyboardButton(
                 '🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑',
                 url=f"https://telegram.me/{temp.U_NAME}?start=getfile-{sanitize_for_url(clean_name)}"
