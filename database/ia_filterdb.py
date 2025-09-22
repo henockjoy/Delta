@@ -26,7 +26,6 @@ tempDict = {'indexDB': DATABASE_URI}
 client = AsyncIOMotorClient(DATABASE_URI)
 db = client[DATABASE_NAME]
 instance = Instance.from_db(db)
-sent_collection = db['sent_files']  # collection for storing sent movies/series
 
 
 # Primary DB Model
@@ -218,143 +217,134 @@ def unpack_new_file_id(new_file_id):
     return file_id, file_ref
 
 # ------------------------------
-# Batching containers
+# Episode batching storage
 # ------------------------------
-episode_batch = defaultdict(list)
-batch_tasks = {}
-series_languages = defaultdict(set)
-
-# ------------------------------
-# Sanitize for button link
-# ------------------------------
-def sanitize_for_url(name: str) -> str:
-    name = re.sub(r"[()\[\]{}:;'\.!]", "", name)
-    name = name.replace(" ", "-")
-    return name
+episode_batch = defaultdict(list)   # key = "SeriesName S01", value = list of episodes
+batch_tasks = {}  # prevent duplicate scheduling
 
 # ------------------------------
-# Convert list of episodes to ranges E01-E03
+# Schedule batched series message
 # ------------------------------
-def episodes_to_ranges(episodes):
-    sorted_eps = sorted(int(e[1:]) for e in episodes)
-    ranges = []
-    start = prev = sorted_eps[0]
+async def schedule_series_batch(bot, series_key, display_name, language, genres):
+    """Send combined message after delay for a batch of episodes"""
+    await asyncio.sleep(10)  # batch delay (10s)
+    
+    # Preserve order, remove duplicates
+    episodes = list(dict.fromkeys(episode_batch[series_key]))
+    episode_batch.pop(series_key, None)  # clear batch
+    batch_tasks.pop(series_key, None)    # clear task
 
-    for num in sorted_eps[1:]:
-        if num == prev + 1:
-            prev = num
-        else:
-            if start == prev:
-                ranges.append(f"E{start:02d}")
-            else:
-                ranges.append(f"E{start:02d}–E{prev:02d}")
-            start = prev = num
-
-    if start == prev:
-        ranges.append(f"E{start:02d}")
-    else:
-        ranges.append(f"E{start:02d}–E{prev:02d}")
-
-    return ", ".join(ranges)
-
-# ------------------------------
-# Schedule batch for series episodes
-# ------------------------------
-async def schedule_series_batch(series_key, clean_name, season, language, caption, bot, message):
-    await asyncio.sleep(10)
-    episodes = episode_batch.pop(series_key, [])
-    languages = series_languages.pop(series_key, set())
-    batch_tasks.pop(series_key, None)
-
-    if not episodes:
-        return
-
-    # MongoDB duplication check
-    existing = await sent_collection.find_one({"key": series_key, "type": "series"})
-    if existing:
-        return
-    await sent_collection.insert_one({"key": series_key, "type": "series"})
-
-    # Deduplicate and sort
-    episodes = sorted(set(episodes))
-    episode_text = episodes_to_ranges(episodes)
-
-    # Detect genres inline like before
-    genres = ""
-    for g in CAPTION_LANGUAGES:
-        if g.lower() in caption.lower():
-            genres += f"{g}, "
-    genres = genres[:-2] if genres else "🤔 Unknown 😄"
-
-    language_text = ", ".join(sorted(languages)) if languages else "🤔 Unknown 😄"
-
-    text = f"<b>✅ {series_key} #𝚃𝚅𝚂𝙴𝚁𝙸𝙴𝚂</b>\n\n"
-    text += f"<blockquote><b>🎙 {language_text}</b></blockquote>\n"
-    text += f"<b>📽 Episodes:</b> <code>{episode_text}</code>\n\n"
+    episodes_line = f"<b>📽 Episodes:</b> {', '.join(episodes)}\n\n"
+    text = f"<b>✅{display_name} #𝖳𝖵𝖲𝖤𝖱𝖨𝖤𝖲</b>\n\n"
+    text += f"<blockquote><b>🎙 {language}</b></blockquote>\n"
+    text += episodes_line
     text += f"<b>📽 Genre:</b> {genres}"
 
-    btn = [[InlineKeyboardButton(
-        '🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑',
-        url=f"https://telegram.me/{temp.U_NAME}?start=getfile-{sanitize_for_url(series_key)}"
-    )]]
-    reply_markup = InlineKeyboardMarkup(btn)
+    # Clean button link (no repeated S01)
+    btn_link = f"https://telegram.me/{temp.U_NAME}?start=getfile-{display_name.replace(' ', '-')}"
+    btn = [[InlineKeyboardButton('🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑', url=btn_link)]]
 
-    await message.reply_text(text, reply_markup=reply_markup)
+    await bot.send_message(
+        chat_id=MOVIE_UPDATE_CHANNEL,
+        text=text,
+        reply_markup=InlineKeyboardMarkup(btn)
+    )
 
 # ------------------------------
-# Handle new file
+# Send message for movies or series
 # ------------------------------
-async def handle_new_file(bot, message, filename, caption, language):
+async def send_msg(bot, filename, caption): 
     try:
-        clean_name = re.sub(r'\(\@\S+\)|\[\@\S+\]|\b@\S+|\bwww\.\S+', '', filename).strip()
+        # Clean filename & caption
+        filename = re.sub(r'\(\@\S+\)|\[\@\S+\]|\b@\S+|\bwww\.\S+', '', filename).strip()
+        caption = re.sub(r'\(\@\S+\)|\[\@\S+\]|\b@\S+|\bwww\.\S+', '', caption).strip()
+        
+        # Year detection
+        year_match = re.search(r"\b(19|20)\d{2}\b", caption)
+        year = year_match.group(0) if year_match else None
 
-        # Detect series pattern
-        series_match = re.search(r'[Ss](\d{1,2})[ ._-]*[Ee](\d{1,3})', filename)
-        if series_match:
-            season = series_match.group(1)
-            episode = series_match.group(2)
-            series_key = f"{clean_name} S{season.zfill(2)}"
+        # Season / Episode detection
+        season_match = re.search(r"(?i)(?:s|season)0*(\d{1,2})", caption) or re.search(r"(?i)(?:s|season)0*(\d{1,2})", filename)
+        episode_match = re.search(r"(?i)E(\d{1,3})", caption) or re.search(r"(?i)E(\d{1,3})", filename)
 
-            # Deduplicate in MongoDB
-            existing_series = await sent_collection.find_one({"key": series_key, "type": "series"})
-            if existing_series and f"E{episode.zfill(2)}" in episode_batch.get(series_key, []):
-                return
+        season = season_match.group(1) if season_match else None 
+        episode = episode_match.group(1) if episode_match else None
 
-            episode_batch[series_key].append(f"E{episode.zfill(2)}")
-            series_languages[series_key].add(language)
+        # Decide Movie / Series
+        is_series = True if (season or episode) else False
+        tag = "#𝖳𝖵𝖲𝖤𝖱𝖨𝖤𝖲" if is_series else "#𝖬𝖮𝖵𝖨𝖤"
+
+        # Trim filename if needed
+        if year:
+            filename = filename[: filename.find(year) + 4]  
+        elif season and season in filename:
+            filename = filename[: filename.find(season) + 1]
+
+        # Language detection
+        language = ""
+        for lang in CAPTION_LANGUAGES:
+            if lang.lower() in caption.lower():
+                language += f"{lang}, "
+        language = language[:-2] if language else "🤔 Unknown 😄"
+
+        # Clean filename for display
+        clean_name = re.sub(r"[\(\)\[\]\{\}:;'\-!]", "", filename).strip()
+
+        # Duplication check key
+        if is_series:
+            # Avoid repeated Sxx
+            display_name = clean_name
+            if not re.search(r"(?i)S\d{1,2}", clean_name):
+                display_name += f" S{season.zfill(2)}"
+            series_key = display_name
+            unique_key = series_key
+        else:
+            display_name = clean_name
+            unique_key = clean_name
+
+        if not await add_name(OWNERID, unique_key):
+            return  # already posted, skip
+
+        # Fetch metadata
+        imdb = await get_movie_details(clean_name)  
+        if imdb and imdb.get("genres"):
+            if isinstance(imdb["genres"], list):
+                genres = ", ".join(imdb["genres"])
+            else:
+                genres = imdb["genres"]
+        else:
+            genres = "🎭 Unknown 😅"
+
+        # Handle series batching
+        if is_series:
+            if episode:
+                episode_batch[series_key].append(f"E{episode.zfill(2)}")
+            else:
+                episode_batch[series_key].append("E??")
 
             if series_key not in batch_tasks:
                 batch_tasks[series_key] = asyncio.create_task(
-                    schedule_series_batch(series_key, clean_name, season, language, caption, bot, message)
+                    schedule_series_batch(bot, series_key, display_name, language, genres)
                 )
-        else:
-            # Movie duplication check
-            existing_movie = await sent_collection.find_one({"key": clean_name, "type": "movie"})
-            if existing_movie:
-                return
-            await sent_collection.insert_one({"key": clean_name, "type": "movie"})
+            return  # don't send immediately
 
-            # Detect genres inline like before
-            genres = ""
-            for g in CAPTION_LANGUAGES:
-                if g.lower() in caption.lower():
-                    genres += f"{g}, "
-            genres = genres[:-2] if genres else "🤔 Unknown 😄"
+        # Movies → send immediately
+        text = f"<b>✅{display_name} {tag}</b>\n\n"
+        text += f"<blockquote><b>🎙 {language}</b></blockquote>\n\n"
+        text += f"📽 Genre: {genres}"
 
-            text = f"<b>✅ {clean_name} #𝙼𝙾𝚅𝙸𝙴</b>\n\n"
-            text += f"<blockquote><b>🎙 {language}</b></blockquote>\n"
-            text += f"<b>📽 Genre:</b> {genres}"
+        # Clean button link
+        btn_link = f"https://telegram.me/{temp.U_NAME}?start=getfile-{display_name.replace(' ', '-')}"
+        btn = [[InlineKeyboardButton('🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑', url=btn_link)]]
 
-            btn = [[InlineKeyboardButton(
-                '🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑',
-                url=f"https://telegram.me/{temp.U_NAME}?start=getfile-{sanitize_for_url(clean_name)}"
-            )]]
-            reply_markup = InlineKeyboardMarkup(btn)
-
-            await message.reply_text(text, reply_markup=reply_markup)
+        await bot.send_message(
+            chat_id=MOVIE_UPDATE_CHANNEL,
+            text=text,
+            reply_markup=InlineKeyboardMarkup(btn)
+        )
 
     except Exception as e:
-        logging.error(f"Error handling file: {e}")
+        logging.error(f"send_msg error: {e}")
         
 async def get_qualities(text, qualities: list):
     """Get all Quality from text"""
