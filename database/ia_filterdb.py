@@ -263,12 +263,21 @@ async def send_msg(bot, filename, caption):
         year_match = re.search(r"\b(19|20)\d{2}\b", caption)
         year = year_match.group(0) if year_match else None
 
-        # Season / Episode detection
-        season_match = re.search(r"(?i)(?:s|season)0*(\d{1,2})", caption) or re.search(r"(?i)(?:s|season)0*(\d{1,2})", filename)
-        episode_match = re.search(r"(?i)E(\d{1,3})", caption) or re.search(r"(?i)E(\d{1,3})", filename)
+        # Season / Episode detection (stricter regex)
+        season_match = re.search(r"(?i)(?:\bS|Season)\s*0*(\d{1,2})\b", caption) \
+            or re.search(r"(?i)(?:\bS|Season)\s*0*(\d{1,2})\b", filename)
 
-        season = season_match.group(1) if season_match else None 
+        episode_match = re.search(r"(?i)\bE(\d{1,3})\b", caption) \
+            or re.search(r"(?i)\bE(\d{1,3})\b", filename)
+
+        season = season_match.group(1) if season_match else None
         episode = episode_match.group(1) if episode_match else None
+
+        # Safety: zfill only if not None
+        if season:
+            season = season.zfill(2)
+        if episode:
+            episode = episode.zfill(2)
 
         # Decide Movie / Series
         is_series = True if (season or episode) else False
@@ -317,8 +326,9 @@ async def send_msg(bot, filename, caption):
 
         # Handle series batching
         if is_series:
+            series_key = f"{clean_name} S{season}" if season else clean_name
             if episode:
-                episode_batch[series_key].append(f"E{episode.zfill(2)}")
+                episode_batch[series_key].append(f"E{episode}")
             else:
                 episode_batch[series_key].append("E??")
 
