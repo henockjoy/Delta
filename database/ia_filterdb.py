@@ -319,7 +319,7 @@ async def send_msg(bot, filename, caption):
         if year:
             filename = filename[: filename.find(year) + 4]
         elif season and season in filename:
-            filename = filename[: filename.find(season) + 1]
+            filename = filename[: filename.find(season) + len(season)]
 
         # Language detection (unchanged)
         language = ""
