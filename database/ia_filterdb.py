@@ -14,7 +14,7 @@ from .Imdbposter import get_movie_details, fetch_image
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 import asyncio
 from collections import defaultdict
-
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -220,131 +220,156 @@ def unpack_new_file_id(new_file_id):
 # Episode batching storage
 # ------------------------------
 episode_batch = defaultdict(list)   # key = "SeriesName S01", value = list of episodes
-batch_tasks = {}  # prevent duplicate scheduling
+batch_tasks = {}                    # key = series_key → scheduled task
+batch_messages = {}                 # key = series_key → message_id
 
 # ------------------------------
 # Schedule batched series message
 # ------------------------------
 async def schedule_series_batch(bot, series_key, display_name, language, genres):
-    """Send combined message after delay for a batch of episodes"""
-    await asyncio.sleep(10)  # batch delay (10s)
-    
-    # Preserve order, remove duplicates
-    episodes = list(dict.fromkeys(episode_batch[series_key]))
-    episode_batch.pop(series_key, None)  # clear batch
-    batch_tasks.pop(series_key, None)    # clear task
+    """Send or update combined message for a batch of episodes"""
+    await asyncio.sleep(10)  # batch delay
 
-    episodes_line = f"<b>📽 Episodes:</b> {', '.join(episodes)}\n\n"
-    text = f"<b>✅{display_name} #𝖳𝖵𝖲𝖤𝖱𝖨𝖤𝖲</b>\n\n"
-    text += f"<blockquote><b>🎙 {language}</b></blockquote>\n"
-    text += episodes_line
-    text += f"<b>📽 Genre:</b> {genres}"
+    try:
+        episodes = list(dict.fromkeys(episode_batch.get(series_key, [])))
+        if not episodes:
+            return
 
-    # Clean button link (no repeated S01)
-    btn_link = f"https://telegram.me/{temp.U_NAME}?start=getfile-{display_name.replace(' ', '-')}"
-    btn = [[InlineKeyboardButton('🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑', url=btn_link)]]
+        # Show episodes as range
+        if len(episodes) == 1:
+            episodes_line = f"<b>📽 Episodes:</b> {episodes[0]}\n\n"
+        else:
+            episodes_line = f"<b>📽 Episodes:</b> {episodes[0]} - {episodes[-1]}\n\n"
 
-    await bot.send_message(
-        chat_id=MOVIE_UPDATE_CHANNEL,
-        text=text,
-        reply_markup=InlineKeyboardMarkup(btn)
-    )
+        text = f"<b>✅{display_name} #𝖳𝖵𝖲𝖤𝖱𝖨𝖤𝖲</b>\n\n"
+        text += f"<blockquote><b>🎙 {language}</b></blockquote>\n"
+        text += episodes_line
+        text += f"<b>📽 Genre:</b> {genres}"
+
+        btn_link = f"https://telegram.me/{temp.U_NAME}?start=getfile-{quote(display_name.replace(' ', '-'))}"
+        btn = [[InlineKeyboardButton('🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑', url=btn_link)]]
+
+        # Edit existing message if exists
+        if series_key in batch_messages:
+            try:
+                await bot.edit_message_text(
+                    chat_id=MOVIE_UPDATE_CHANNEL,
+                    message_id=batch_messages[series_key],
+                    text=text,
+                    reply_markup=InlineKeyboardMarkup(btn)
+                )
+            except Exception as e:
+                logging.error(f"Failed to edit message: {e}")
+            finally:
+                episode_batch.pop(series_key, None)
+                batch_tasks.pop(series_key, None)
+            return
+
+        # Send new message
+        msg = await bot.send_message(
+            chat_id=MOVIE_UPDATE_CHANNEL,
+            text=text,
+            reply_markup=InlineKeyboardMarkup(btn)
+        )
+        batch_messages[series_key] = msg.id
+        episode_batch.pop(series_key, None)
+        batch_tasks.pop(series_key, None)
+
+    except Exception as e:
+        logging.error(f"schedule_series_batch error: {e}")
 
 # ------------------------------
 # Send message for movies or series
 # ------------------------------
-async def send_msg(bot, filename, caption): 
+async def send_msg(bot, filename, caption):
     try:
         # Clean filename & caption
         filename = re.sub(r'\(\@\S+\)|\[\@\S+\]|\b@\S+|\bwww\.\S+', '', filename).strip()
         caption = re.sub(r'\(\@\S+\)|\[\@\S+\]|\b@\S+|\bwww\.\S+', '', caption).strip()
-        
-        # Year detection
-        year_match = re.search(r"\b(19|20)\d{2}\b", caption)
-        year = year_match.group(0) if year_match else None
 
-        # Season / Episode detection (stricter regex)
-        season_match = re.search(r"(?i)(?:\bS|Season)\s*0*(\d{1,2})\b", caption) \
-            or re.search(r"(?i)(?:\bS|Season)\s*0*(\d{1,2})\b", filename)
+        # ------------------------------
+        # Detect season & episode
+        # ------------------------------
+        season, episode = None, None
 
-        episode_match = re.search(r"(?i)\bE(\d{1,3})\b", caption) \
-            or re.search(r"(?i)\bE(\d{1,3})\b", filename)
+        se_ep_match = re.search(r"(?i)S(\d{1,2})E(\d{1,3})", filename) \
+            or re.search(r"(?i)S(\d{1,2})E(\d{1,3})", caption)
 
-        season = season_match.group(1) if season_match else None
-        episode = episode_match.group(1) if episode_match else None
+        if se_ep_match:
+            season, episode = se_ep_match.group(1), se_ep_match.group(2)
+        else:
+            season_match = re.search(r"(?i)(?:\bS|Season)\s*0*(\d{1,2})\b", filename) \
+                or re.search(r"(?i)(?:\bS|Season)\s*0*(\d{1,2})\b", caption)
+            episode_match = re.search(r"(?i)\bE(\d{1,3})\b", filename) \
+                or re.search(r"(?i)\bE(\d{1,3})\b", caption)
+            season = season_match.group(1) if season_match else None
+            episode = episode_match.group(1) if episode_match else None
 
-        # Safety: zfill only if not None
         if season:
             season = season.zfill(2)
         if episode:
             episode = episode.zfill(2)
 
-        # Decide Movie / Series
         is_series = True if (season or episode) else False
         tag = "#𝖳𝖵𝖲𝖤𝖱𝖨𝖤𝖲" if is_series else "#𝖬𝖮𝖵𝖨𝖤"
 
-        # Trim filename if needed
+        # Trim filename
+        year_match = re.search(r"\b(19|20)\d{2}\b", caption)
+        year = year_match.group(0) if year_match else None
         if year:
-            filename = filename[: filename.find(year) + 4]  
+            filename = filename[: filename.find(year) + 4]
         elif season and season in filename:
             filename = filename[: filename.find(season) + 1]
 
-        # Language detection
+        # Language detection (unchanged)
         language = ""
         for lang in CAPTION_LANGUAGES:
             if lang.lower() in caption.lower():
                 language += f"{lang}, "
-        language = language[:-2] if language else "🤔 Unknown 😄"
+        language = language[:-2] if language else "Unknown"
 
-        # Clean filename for display
+        # Clean display name
         clean_name = re.sub(r"[\(\)\[\]\{\}:;'\-!]", "", filename).strip()
 
-        # Duplication check key
-        if is_series:
-            # Avoid repeated Sxx
-            display_name = clean_name
-            if not re.search(r"(?i)S\d{1,2}", clean_name):
-                display_name += f" S{season.zfill(2)}"
-            series_key = display_name
-            unique_key = series_key
-        else:
-            display_name = clean_name
-            unique_key = clean_name
+        # Duplication key
+        display_name = clean_name
+        if is_series and not re.search(r"(?i)S\d{1,2}", clean_name):
+            display_name += f" S{season.zfill(2)}"
+        unique_key = display_name
 
         if not await add_name(OWNERID, unique_key):
-            return  # already posted, skip
+            return  # skip duplicates
 
-        # Fetch metadata
-        imdb = await get_movie_details(clean_name)  
+        # Fetch genres (unchanged)
+        imdb = await get_movie_details(clean_name)
         if imdb and imdb.get("genres"):
-            if isinstance(imdb["genres"], list):
-                genres = ", ".join(imdb["genres"])
-            else:
-                genres = imdb["genres"]
+            genres = ", ".join(imdb["genres"]) if isinstance(imdb["genres"], list) else imdb["genres"]
         else:
-            genres = "🎭 Unknown 😅"
+            genres = "Unknown"
 
-        # Handle series batching
+        # ------------------------------
+        # Series batching
+        # ------------------------------
         if is_series:
             series_key = f"{clean_name} S{season}" if season else clean_name
-            if episode:
-                episode_batch[series_key].append(f"E{episode}")
-            else:
-                episode_batch[series_key].append("E??")
+            episode_batch[series_key].append(f"E{episode}" if episode else "E??")
 
-            if series_key not in batch_tasks:
-                batch_tasks[series_key] = asyncio.create_task(
-                    schedule_series_batch(bot, series_key, display_name, language, genres)
-                )
-            return  # don't send immediately
+            # Start or restart batching task
+            if series_key in batch_tasks:
+                batch_tasks[series_key].cancel()
+            batch_tasks[series_key] = asyncio.create_task(
+                schedule_series_batch(bot, series_key, display_name, language, genres)
+            )
+            return
 
-        # Movies → send immediately
+        # ------------------------------
+        # Movie message
+        # ------------------------------
         text = f"<b>✅{display_name} {tag}</b>\n\n"
         text += f"<blockquote><b>🎙 {language}</b></blockquote>\n\n"
-        text += f"📽 Genre: {genres}"
+        text += f"<b>📽 Genre:</b> {genres}"
 
-        # Clean button link
-        btn_link = f"https://telegram.me/{temp.U_NAME}?start=getfile-{display_name.replace(' ', '-')}"
+        btn_link = f"https://telegram.me/{temp.U_NAME}?start=getfile-{quote(display_name.replace(' ', '-'))}"
         btn = [[InlineKeyboardButton('🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑', url=btn_link)]]
 
         await bot.send_message(
