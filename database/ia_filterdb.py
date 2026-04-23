@@ -16,6 +16,7 @@ from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 import asyncio
 from collections import defaultdict
 from urllib.parse import quote
+from rapidfuzz import fuzz
 
 TMDB_API_KEY = "0da1b0909b6f81d9543daf54db258f5a"
 TMDB_BASE = "https://api.themoviedb.org/3"
@@ -233,9 +234,18 @@ async def get_tmdb_card(query):
 
         results = data.get("results", [])
         if not results:
-            return None
-
-        item = results[0]
+            return None   
+        def best_match(results, query):
+            best = None
+            best_score = 0
+            for r in results:
+                title = r.get("title") or r.get("name") or ""
+                score = fuzz.token_sort_ratio(query.lower(), title.lower())
+                if score > best_score:
+                    best = r
+                    best_score = score
+            return best or results[0]
+        item = best_match(results, query)
         media_type = item.get("media_type")
         media_id = item.get("id")
 
@@ -257,8 +267,17 @@ async def get_tmdb_card(query):
             }, timeout=10) as r:
                 ott_data = await r.json()
 
-        ott = ott_data.get("results", {}).get("IN", {}).get("flatrate", [])
-        ott = [p["provider_name"] for p in ott] if ott else ["Not Available"]
+        regions = ["IN", "US", "GB", "CA", "AU"]
+
+        ott = []
+        for r in regions:
+            providers = ott_data.get("results", {}).get(r, {}).get("flatrate", [])
+            if providers:
+                ott = [p["provider_name"] for p in providers]
+                break
+
+        if not ott:
+            ott = ["Not Available"]
 
         return {
             "genres": genres,
@@ -394,6 +413,12 @@ async def send_msg(bot, filename, caption):
             return  # skip duplicates
 
         # Fetch genres (unchanged)
+        def clean_query(text):
+            text = re.sub(r"\b(19|20)\d{2}\b", "", text)
+            text = re.sub(r"[.\-_]", " ", text)
+            text = re.sub(r"\s+", " ", text).strip()
+            return text
+        clean_name = clean_query(clean_name)
         tmdb = await get_tmdb_card(clean_name)
 
         if tmdb:
@@ -430,7 +455,7 @@ async def send_msg(bot, filename, caption):
         # ------------------------------
         text = f"<b>✅{display_name} {tag}</b>\n\n"
         text += f"<blockquote><b>🎙 {language}</b></blockquote>\n"
-        text += f"<b>📽 Genre:</b> {genres}\n"
+        text += f"<b>📽 Genre:</b> {genres}\n\n"
         text += f"<b>📡 OTT:</b> {' • '.join(ott) if ott else 'Not Available'}"
 
         btn_link = f"https://telegram.me/{temp.U_NAME}?start=getfile-{quote(display_name.replace(' ', '-'))}"
@@ -452,7 +477,7 @@ async def get_qualities(text, qualities: list):
         if q in text:
             quality.append(q)
     quality = ", ".join(quality)
-    return quality[:-2] if quality.endswith(", ") else quality
+    return quality
 
 
 
