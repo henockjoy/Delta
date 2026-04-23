@@ -2,6 +2,7 @@ import logging
 from struct import pack
 import re
 import base64
+import aiohttp
 from pyrogram.file_id import FileId
 from pymongo.errors import DuplicateKeyError
 from umongo import Instance, Document, fields
@@ -15,6 +16,9 @@ from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 import asyncio
 from collections import defaultdict
 from urllib.parse import quote
+
+TMDB_API_KEY = "0da1b0909b6f81d9543daf54db258f5a"
+TMDB_BASE = "https://api.themoviedb.org/3"
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -216,6 +220,55 @@ def unpack_new_file_id(new_file_id):
     file_ref = encode_file_ref(decoded.file_reference)
     return file_id, file_ref
 
+async def get_tmdb_card(query):
+    try:
+        search_url = f"{TMDB_BASE}/search/multi"
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(search_url, params={
+                "api_key": TMDB_API_KEY,
+                "query": query
+            }, timeout=10) as resp:
+                data = await resp.json()
+
+        results = data.get("results", [])
+        if not results:
+            return None
+
+        item = results[0]
+        media_type = item.get("media_type")
+        media_id = item.get("id")
+
+        detail_url = f"{TMDB_BASE}/{media_type}/{media_id}"
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(detail_url, params={
+                "api_key": TMDB_API_KEY
+            }, timeout=10) as resp:
+                detail = await resp.json()
+
+        genres = [g["name"] for g in detail.get("genres", [])]
+
+        ott_url = f"{TMDB_BASE}/{media_type}/{media_id}/watch/providers"
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(ott_url, params={
+                "api_key": TMDB_API_KEY
+            }, timeout=10) as r:
+                ott_data = await r.json()
+
+        ott = ott_data.get("results", {}).get("IN", {}).get("flatrate", [])
+        ott = [p["provider_name"] for p in ott] if ott else ["Not Available"]
+
+        return {
+            "genres": genres,
+            "ott": ott
+        }
+
+    except Exception as e:
+        logger.error(f"TMDB error: {e}")
+        return None
+
 # ------------------------------
 # Episode batching storage
 # ------------------------------
@@ -285,7 +338,7 @@ async def send_msg(bot, filename, caption):
     try:
         # Clean filename & caption
         filename = re.sub(r'\(\@\S+\)|\[\@\S+\]|\b@\S+|\bwww\.\S+', '', filename).strip()
-        caption = re.sub(r'\(\@\S+\)|\[\@\S+\]|\b@\S+|\bwww\.\S+', '', caption).strip()
+        caption = re.sub(r'\(\@\S+\)|\[\@\S+\]|\b@\S+|\bwww\.\S+', '', caption or '').strip()
 
         # ------------------------------
         # Detect season & episode
@@ -341,18 +394,28 @@ async def send_msg(bot, filename, caption):
             return  # skip duplicates
 
         # Fetch genres (unchanged)
-        imdb = await get_movie_details(clean_name)
-        if imdb and imdb.get("genres"):
-            genres = ", ".join(imdb["genres"]) if isinstance(imdb["genres"], list) else imdb["genres"]
+        tmdb = await get_tmdb_card(clean_name)
+
+        if tmdb:
+            genres = ", ".join(tmdb.get("genres", [])) or "Unknown"
+            ott = tmdb.get("ott") or ["Not Available"]
         else:
-            genres = "Unknown"
+            imdb = await get_movie_details(clean_name)
+            genres = (
+                ", ".join(imdb["genres"])
+                if imdb and isinstance(imdb.get("genres"), list)
+                else (imdb.get("genres") if imdb else "Unknown")
+            )
+            ott = ["Not Available"]
 
         # ------------------------------
         # Series batching
         # ------------------------------
         if is_series:
-            series_key = f"{clean_name} S{season}" if season else clean_name
-            episode_batch[series_key].append(f"E{episode}" if episode else "E??")
+            season_num = season.zfill(2) if season else "01"
+            series_key = f"{clean_name} S{season_num}"
+            if episode and episode.isdigit():
+                episode_batch[series_key].append(f"E{episode}")
 
             # Start or restart batching task
             if series_key in batch_tasks:
@@ -366,8 +429,9 @@ async def send_msg(bot, filename, caption):
         # Movie message
         # ------------------------------
         text = f"<b>✅{display_name} {tag}</b>\n\n"
-        text += f"<blockquote><b>🎙 {language}</b></blockquote>\n\n"
-        text += f"<b>📽 Genre:</b> {genres}"
+        text += f"<blockquote><b>🎙 {language}</b></blockquote>\n"
+        text += f"<b>📽 Genre:</b> {genres}\n"
+        text += f"<b>📡 OTT:</b> {' • '.join(ott) if ott else 'Not Available'}"
 
         btn_link = f"https://telegram.me/{temp.U_NAME}?start=getfile-{quote(display_name.replace(' ', '-'))}"
         btn = [[InlineKeyboardButton('🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑', url=btn_link)]]
