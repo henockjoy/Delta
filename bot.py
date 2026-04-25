@@ -17,6 +17,7 @@ import pytz
 from aiohttp import web
 
 from database.ia_filterdb import Media, choose_mediaDB, tempDict, db as clientDB
+from database.ia_filterdb import init_aiohttp, close_aiohttp
 from database.users_chats_db import db
 from info import *
 from utils import temp
@@ -44,6 +45,7 @@ files = glob.glob(ppath)
 async def Lucy_start():
     print('\n')
     print('\nInitalizing Yoon')
+    await init_aiohttp()  # ✅ START aiohttp session
     try:
         await Codeflix.start()
     except FloodWait as e:
@@ -94,6 +96,8 @@ async def Lucy_start():
     bind_address = "0.0.0.0"
     await web.TCPSite(app, bind_address, PORT).start()
     await idle()
+
+    await close_aiohttp()  # ✅ CLOSE aiohttp session
     
 if __name__ == '__main__':
     loop = asyncio.get_event_loop()
