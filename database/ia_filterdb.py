@@ -18,6 +18,8 @@ from collections import defaultdict
 from urllib.parse import quote
 from rapidfuzz import fuzz
 
+aiohttp_session = None
+
 TMDB_API_KEY = "0da1b0909b6f81d9543daf54db258f5a"
 TMDB_BASE = "https://api.themoviedb.org/3"
 
@@ -221,20 +223,51 @@ def unpack_new_file_id(new_file_id):
     file_ref = encode_file_ref(decoded.file_reference)
     return file_id, file_ref
 
+def get_cert_emoji(cert):
+    cert = (cert or "").upper()
+
+    mapping = {
+        "U": "🎭 U",
+        "UA": "👨‍👩‍👧 UA",
+        "A": "✨ A",
+        "PG": "🛡️ PG",
+        "PG-13": "🎬 PG-13",
+        "R": "🔞 R",
+        "NC-17": "⛔ NC-17",
+        "G": "🔖 G",
+        "TV-MA": "🔞 TV-MA",
+        "TV-14": "🎞️ TV-14",
+        "TV-PG": "🤫 TV-PG"
+    }
+
+    return mapping.get(cert, f"⚪ {cert if cert else 'NR'}")
+
+async def init_aiohttp():
+    global aiohttp_session
+    if aiohttp_session is None:
+        aiohttp_session = aiohttp.ClientSession()
+
+async def close_aiohttp():
+    global aiohttp_session
+    if aiohttp_session:
+        await aiohttp_session.close()
+
 async def get_tmdb_card(query):
+    if aiohttp_session is None:
+        raise RuntimeError("aiohttp session not initialized")
     try:
         search_url = f"{TMDB_BASE}/search/multi"
 
-        async with aiohttp.ClientSession() as session:
-            async with session.get(search_url, params={
-                "api_key": TMDB_API_KEY,
-                "query": query
-            }, timeout=10) as resp:
-                data = await resp.json()
+        async with aiohttp_session.get(search_url, params={
+            "api_key": TMDB_API_KEY,
+            "query": query
+        }, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            data = await resp.json()
 
         results = data.get("results", [])
         if not results:
             return None   
+
         def best_match(results, query):
             best = None
             best_score = 0
@@ -245,27 +278,32 @@ async def get_tmdb_card(query):
                     best = r
                     best_score = score
             return best or results[0]
+
         item = best_match(results, query)
         media_type = item.get("media_type")
         media_id = item.get("id")
 
+        # ------------------------------
+        # DETAILS
+        # ------------------------------
         detail_url = f"{TMDB_BASE}/{media_type}/{media_id}"
 
-        async with aiohttp.ClientSession() as session:
-            async with session.get(detail_url, params={
-                "api_key": TMDB_API_KEY
-            }, timeout=10) as resp:
-                detail = await resp.json()
+        async with aiohttp_session.get(detail_url, params={
+            "api_key": TMDB_API_KEY
+        }, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            detail = await resp.json()
 
         genres = [g["name"] for g in detail.get("genres", [])]
 
+        # ------------------------------
+        # OTT
+        # ------------------------------
         ott_url = f"{TMDB_BASE}/{media_type}/{media_id}/watch/providers"
 
-        async with aiohttp.ClientSession() as session:
-            async with session.get(ott_url, params={
-                "api_key": TMDB_API_KEY
-            }, timeout=10) as r:
-                ott_data = await r.json()
+        async with aiohttp_session.get(ott_url, params={
+            "api_key": TMDB_API_KEY
+        }, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            ott_data = await r.json()
 
         regions = ["IN", "US", "GB", "CA", "AU"]
 
@@ -279,9 +317,71 @@ async def get_tmdb_card(query):
         if not ott:
             ott = ["Not Available"]
 
+        # ------------------------------
+        # Runtime & Rating
+        # ------------------------------
+        if media_type == "movie":
+            runtime = detail.get("runtime") or 0
+        else:
+            runtime_list = detail.get("episode_run_time") or []
+            runtime = runtime_list[0] if runtime_list else 0
+
+        rating = detail.get("vote_average") or 0
+
+        hours = runtime // 60
+        minutes = runtime % 60
+        runtime_str = f"{hours}h {minutes}m" if runtime else "Unknown"
+        rating = round(rating, 1) if rating else "N/A"
+
+        # ------------------------------
+        # Certification
+        # ------------------------------
+        certification = "NR"
+
+        try:
+            if media_type == "movie":
+                cert_url = f"{TMDB_BASE}/movie/{media_id}/release_dates"
+
+                async with aiohttp_session.get(cert_url, params={
+                    "api_key": TMDB_API_KEY
+                }) as resp:
+                    cert_data = await resp.json()
+
+                for country in cert_data.get("results", []):
+                    if country["iso_3166_1"] in ["IN", "US", "GB"]:
+                        for rel in country.get("release_dates", []):
+                            if rel.get("certification"):
+                                certification = rel["certification"]
+                                break
+                    if certification != "NR":
+                        break
+
+            elif media_type == "tv":
+                cert_url = f"{TMDB_BASE}/tv/{media_id}/content_ratings"
+
+                async with aiohttp_session.get(cert_url, params={
+                    "api_key": TMDB_API_KEY
+                }) as resp:
+                    cert_data = await resp.json()
+
+                for country in cert_data.get("results", []):
+                    if country["iso_3166_1"] in ["IN", "US", "GB"]:
+                        if country.get("rating"):
+                            certification = country["rating"]
+                            break
+
+        except Exception as e:
+            logger.warning(f"Certification fetch failed: {e}")
+
+        # ------------------------------
+        # FINAL RETURN
+        # ------------------------------
         return {
             "genres": genres,
-            "ott": ott
+            "ott": ott,
+            "runtime": runtime_str,
+            "rating": rating,
+            "certification": certification
         }
 
     except Exception as e:
@@ -424,14 +524,19 @@ async def send_msg(bot, filename, caption):
         if tmdb:
             genres = ", ".join(tmdb.get("genres", [])) or "Unknown"
             ott = tmdb.get("ott") or ["Not Available"]
+
+            runtime = tmdb.get("runtime", "Unknown")
+            rating = tmdb.get("rating", "N/A")
+
+            cert_raw = tmdb.get("certification", "NR")
+            cert = get_cert_emoji(cert_raw)
+
         else:
-            imdb = await get_movie_details(clean_name)
-            genres = (
-                ", ".join(imdb["genres"])
-                if imdb and isinstance(imdb.get("genres"), list)
-                else (imdb.get("genres") if imdb else "Unknown")
-            )
+            genres = "Unknown"
             ott = ["Not Available"]
+            runtime = "Unknown"
+            rating = "N/A"
+            cert = get_cert_emoji("NR")
 
         # ------------------------------
         # Series batching
@@ -453,7 +558,8 @@ async def send_msg(bot, filename, caption):
         # ------------------------------
         # Movie message
         # ------------------------------
-        text = f"<b>✅{display_name} {tag}</b>\n\n"
+        text = f"<b>✅{display_name} {tag}</b>\n"
+        text += f"<i>{cert} | ⏱ {runtime} | ⭐ {rating}</i>\n\n"
         text += f"<blockquote><b>🎙 {language}</b></blockquote>\n"
         text += f"<b>📽 Genre:</b> {genres}\n\n"
         text += f"<b>📡 OTT:</b> {' • '.join(ott) if ott else 'Not Available'}"
