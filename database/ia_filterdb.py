@@ -398,7 +398,7 @@ batch_messages = {}                 # key = series_key → message_id
 # ------------------------------
 # Schedule batched series message
 # ------------------------------
-async def schedule_series_batch(bot, series_key, display_name, language, genres):
+async def schedule_series_batch(bot, series_key, display_name, language, genres, cert, runtime, rating, ott):
     """Send or update combined message for a batch of episodes"""
     await asyncio.sleep(10)  # batch delay
 
@@ -407,16 +407,11 @@ async def schedule_series_batch(bot, series_key, display_name, language, genres)
         if not episodes:
             return
 
-        # Show episodes as range
-        if len(episodes) == 1:
-            episodes_line = f"<b>📽 Episodes:</b> {episodes[0]}\n\n"
-        else:
-            episodes_line = f"<b>📽 Episodes:</b> {episodes[0]} - {episodes[-1]}\n\n"
-
-        text = f"<b>✅{display_name} #𝖳𝖵𝖲𝖤𝖱𝖨𝖤𝖲</b>\n\n"
+        text = f"<b>✅{display_name} #𝖳𝖵𝖲𝖤𝖱𝖨𝖤𝖲</b>\n"
+        text += f"<code>{cert} | ⏱ {runtime} | ⭐ {rating}</code>\n\n"
         text += f"<blockquote><b>🎙 {language}</b></blockquote>\n"
-        text += episodes_line
-        text += f"<b>📽 Genre:</b> {genres}"
+        text += f"<b>📽 Genre:</b> {genres}\n\n"
+        text += f"<b>📡 OTT:</b> {' • '.join(ott) if ott else 'Not Available'}"
 
         btn_link = f"https://telegram.me/{temp.U_NAME}?start=getfile-{quote(display_name.replace(' ', '-'))}"
         btn = [[InlineKeyboardButton('🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑', url=btn_link)]]
@@ -551,7 +546,7 @@ async def send_msg(bot, filename, caption):
             if series_key in batch_tasks:
                 batch_tasks[series_key].cancel()
             batch_tasks[series_key] = asyncio.create_task(
-                schedule_series_batch(bot, series_key, display_name, language, genres)
+                schedule_series_batch(bot, series_key, display_name, language, genres, cert, runtime, rating)
             )
             return
 
@@ -559,7 +554,7 @@ async def send_msg(bot, filename, caption):
         # Movie message
         # ------------------------------
         text = f"<b>✅{display_name} {tag}</b>\n"
-        text += f"<i>{cert} | ⏱ {runtime} | ⭐ {rating}</i>\n\n"
+        text += f"<code>{cert} | ⏱ {runtime} | ⭐ {rating}</code>\n\n"
         text += f"<blockquote><b>🎙 {language}</b></blockquote>\n"
         text += f"<b>📽 Genre:</b> {genres}\n\n"
         text += f"<b>📡 OTT:</b> {' • '.join(ott) if ott else 'Not Available'}"
