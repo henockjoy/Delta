@@ -224,23 +224,43 @@ def unpack_new_file_id(new_file_id):
     return file_id, file_ref
 
 def get_cert_emoji(cert):
-    cert = (cert or "").upper()
+    cert = (cert or "").upper().strip()
 
     mapping = {
-        "U": "🎭 U",
+        # 🇮🇳 CBFC
+        "U": "👶 U",
         "UA": "👨‍👩‍👧 UA",
-        "A": "✨ A",
-        "PG": "🛡️ PG",
-        "PG-13": "🎬 PG-13",
-        "R": "🔞 R",
-        "NC-17": "⛔ NC-17",
-        "G": "🔖 G",
-        "TV-MA": "🔞 TV-MA",
-        "TV-14": "🎞️ TV-14",
-        "TV-PG": "🤫 TV-PG"
+        "A": "🔞 A",
+        "S": "⚕️ S",
+
+        # Variants
+        "UA 7+": "👨‍👩‍👧 UA",
+        "UA 13+": "👨‍👩‍👧 UA",
+        "UA 16+": "👨‍👩‍👧 UA",
+
+        # 🇺🇸 Movies
+        "G": "👶 U",
+        "PG": "👨‍👩‍👧 UA",
+        "PG-13": "👨‍👩‍👧 UA",
+        "R": "🔞 A",
+        "NC-17": "🔞 A",
+
+        # 📺 TV Ratings
+        "TV-G": "👶 U",
+        "TV-PG": "👨‍👩‍👧 UA",
+        "TV-14": "👨‍👩‍👧 UA",
+        "TV-MA": "🔞 A",
     }
 
-    return mapping.get(cert, f"⚪ {cert if cert else 'NR'}")
+    # Smart fallback handling
+    if cert.startswith("PG"):
+        return "👨‍👩‍👧 UA"
+    if cert.startswith("TV-14"):
+        return "👨‍👩‍👧 UA"
+    if cert.startswith("TV-MA"):
+        return "🔞 A"
+
+    return mapping.get(cert, "👨‍👩‍👧 UA")
 
 async def init_aiohttp():
     global aiohttp_session
