@@ -227,40 +227,41 @@ def get_cert_emoji(cert):
     cert = (cert or "").upper().strip()
 
     mapping = {
-        # 🇮🇳 CBFC
-        "U": "👶 U",
-        "UA": "👨‍👩‍👧 UA",
-        "A": "🔞 A",
-        "S": "⚕️ S",
-
-        # Variants
-        "UA 7+": "👨‍👩‍👧 UA",
-        "UA 13+": "👨‍👩‍👧 UA",
-        "UA 16+": "👨‍👩‍👧 UA",
-
-        # 🇺🇸 Movies
-        "G": "👶 U",
-        "PG": "👨‍👩‍👧 UA",
-        "PG-13": "👨‍👩‍👧 UA",
-        "R": "🔞 A",
-        "NC-17": "🔞 A",
+        # 🎬 Movies (MPAA)
+        "G": "👶 G",
+        "PG": "👨‍👩‍👧 PG",
+        "PG-13": "🎬 PG-13",
+        "R": "🔞 R",
+        "NC-17": "⛔ NC-17",
+        "NR": "🚫 NR",
+        "UR": "✍🏻 UR",
 
         # 📺 TV Ratings
-        "TV-G": "👶 U",
-        "TV-PG": "👨‍👩‍👧 UA",
-        "TV-14": "👨‍👩‍👧 UA",
-        "TV-MA": "🔞 A",
+        "TV-Y": "👶 TV-Y",
+        "TV-Y7": "👦 TV-Y7",
+        "TV-G": "👶 TV-G",
+        "TV-PG": "👨‍👩‍👧 TV-PG",
+        "TV-14": "🎞️ TV-14",
+        "TV-MA": "🔞 TV-MA",
     }
 
-    # Smart fallback handling
+    # 🔥 Smart handling for messy TMDB values
+    if cert.startswith("PG-13"):
+        return "🎬 PG-13"
     if cert.startswith("PG"):
-        return "👨‍👩‍👧 UA"
-    if cert.startswith("TV-14"):
-        return "👨‍👩‍👧 UA"
+        return "👨‍👩‍👧 PG"
+    if cert.startswith("TV-Y7"):
+        return "👦 TV-Y7"
+    if cert.startswith("TV-Y"):
+        return "👶 TV-Y"
     if cert.startswith("TV-MA"):
-        return "🔞 A"
+        return "🔞 TV-MA"
+    if cert.startswith("TV-14"):
+        return "🎞️ TV-14"
+    if cert.startswith("TV-PG"):
+        return "👨‍👩‍👧 TV-PG"
 
-    return mapping.get(cert, "👨‍👩‍👧 UA")
+    return mapping.get(cert, "🚫 NR")
 
 async def init_aiohttp():
     global aiohttp_session
@@ -315,27 +316,7 @@ async def get_tmdb_card(query):
 
         genres = [g["name"] for g in detail.get("genres", [])]
 
-        # ------------------------------
-        # OTT
-        # ------------------------------
-        ott_url = f"{TMDB_BASE}/{media_type}/{media_id}/watch/providers"
-
-        async with aiohttp_session.get(ott_url, params={
-            "api_key": TMDB_API_KEY
-        }, timeout=aiohttp.ClientTimeout(total=10)) as r:
-            ott_data = await r.json()
-
-        regions = ["IN", "US", "GB", "CA", "AU"]
-
-        ott = []
-        for r in regions:
-            providers = ott_data.get("results", {}).get(r, {}).get("flatrate", [])
-            if providers:
-                ott = [p["provider_name"] for p in providers]
-                break
-
-        if not ott:
-            ott = ["Not Available"]
+        
 
         # ------------------------------
         # Runtime & Rating
@@ -398,7 +379,6 @@ async def get_tmdb_card(query):
         # ------------------------------
         return {
             "genres": genres,
-            "ott": ott,
             "runtime": runtime_str,
             "rating": rating,
             "certification": certification
@@ -418,7 +398,7 @@ batch_messages = {}                 # key = series_key → message_id
 # ------------------------------
 # Schedule batched series message
 # ------------------------------
-async def schedule_series_batch(bot, series_key, display_name, language, genres, cert, runtime, rating, ott):
+async def schedule_series_batch(bot, series_key, display_name, language, genres, cert, runtime, rating):
     """Send or update combined message for a batch of episodes"""
     await asyncio.sleep(10)  # batch delay
 
@@ -431,7 +411,6 @@ async def schedule_series_batch(bot, series_key, display_name, language, genres,
         text += f"<code>{cert} | ⏱ {runtime} | ⭐ {rating}</code>\n\n"
         text += f"<blockquote><b>🎙 {language}</b></blockquote>\n"
         text += f"<b>📽 Genre:</b> {genres}\n\n"
-        text += f"<b>📡 OTT:</b> {' • '.join(ott) if ott else 'Not Available'}"
 
         btn_link = f"https://telegram.me/{temp.U_NAME}?start=getfile-{quote(display_name.replace(' ', '-'))}"
         btn = [[InlineKeyboardButton('🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑', url=btn_link)]]
@@ -475,29 +454,32 @@ async def send_msg(bot, filename, caption):
         caption = re.sub(r'\(\@\S+\)|\[\@\S+\]|\b@\S+|\bwww\.\S+', '', caption or '').strip()
 
         # ------------------------------
-        # Detect season & episode
+        # Detect season & episode (IMPROVED)
         # ------------------------------
         season, episode = None, None
 
-        se_ep_match = re.search(r"(?i)S(\d{1,2})E(\d{1,3})", filename) \
-            or re.search(r"(?i)S(\d{1,2})E(\d{1,3})", caption)
+        # Detect SxxExx / SxxVxx
+        se_ep_match = re.search(r"(?i)S(\d{1,2})\s*[-._ ]?\s*(?:E|EP|V)(\d{1,3})", filename) \
+            or re.search(r"(?i)S(\d{1,2})\s*[-._ ]?\s*(?:E|EP|V)(\d{1,3})", caption)
 
         if se_ep_match:
             season, episode = se_ep_match.group(1), se_ep_match.group(2)
-        else:
-            season_match = re.search(r"(?i)(?:\bS|Season)\s*0*(\d{1,2})\b", filename) \
-                or re.search(r"(?i)(?:\bS|Season)\s*0*(\d{1,2})\b", caption)
-            episode_match = re.search(r"(?i)\bE(\d{1,3})\b", filename) \
-                or re.search(r"(?i)\bE(\d{1,3})\b", caption)
-            season = season_match.group(1) if season_match else None
-            episode = episode_match.group(1) if episode_match else None
 
+        # Detect only Season (S01)
+        season_only_match = re.search(r"(?i)\bS(\d{1,2})\b", filename) \
+            or re.search(r"(?i)\bS(\d{1,2})\b", caption)
+
+        if not season and season_only_match:
+            season = season_only_match.group(1)
+
+        # Normalize
         if season:
             season = season.zfill(2)
         if episode:
             episode = episode.zfill(2)
 
-        is_series = True if (season or episode) else False
+        # FINAL DECISION
+        is_series = True if season else False
         tag = "#𝖳𝖵𝖲𝖤𝖱𝖨𝖤𝖲" if is_series else "#𝖬𝖮𝖵𝖨𝖤"
 
         # Trim filename
@@ -513,16 +495,18 @@ async def send_msg(bot, filename, caption):
         for lang in CAPTION_LANGUAGES:
             if lang.lower() in caption.lower():
                 language += f"{lang}, "
-        language = language[:-2] if language else "Unknown"
+        language = language[:-2] if language else "Orginal Audio"
 
-        # Clean display name
-        clean_name = re.sub(r"[\(\)\[\]\{\}:;'\-!]", "", filename).strip()
+        # Clean existing season/episode from name
+        clean_name = re.sub(r"(?i)\bS\d{1,2}([EVP]\d{1,3})?\b", "", clean_name).strip()
 
-        # Duplication key
-        display_name = clean_name
-        if is_series and not re.search(r"(?i)S\d{1,2}", clean_name):
-            display_name += f" S{season.zfill(2)}"
-        unique_key = display_name
+        # Build display name
+        if season and episode:
+            display_name = f"{clean_name} S{season}E{episode}"
+        elif season:
+            display_name = f"{clean_name} S{season}"
+        else:
+            display_name = clean_name
 
         if not await add_name(OWNERID, unique_key):
             return  # skip duplicates
@@ -533,12 +517,15 @@ async def send_msg(bot, filename, caption):
             text = re.sub(r"[.\-_]", " ", text)
             text = re.sub(r"\s+", " ", text).strip()
             return text
-        clean_name = clean_query(clean_name)
+        clean_name = re.sub(r"\bS\d{1,2}E\d{1,3}\b", "", clean_name)
+        clean_name = re.sub(r"\b(WEB-DL|WEBRip|HDRip|BluRay|AAC|x264|H264|DDP5\.1)\b", "", clean_name, flags=re.I)
+        clean_name = re.sub(r"\b(19|20)\d{2}\b", "", clean_name)
+        clean_name = re.sub(r"[.\-_]", " ", clean_name)
+        clean_name = re.sub(r"\s+", " ", clean_name).strip()
         tmdb = await get_tmdb_card(clean_name)
 
         if tmdb:
             genres = ", ".join(tmdb.get("genres", [])) or "Unknown"
-            ott = tmdb.get("ott") or ["Not Available"]
 
             runtime = tmdb.get("runtime", "Unknown")
             rating = tmdb.get("rating", "N/A")
@@ -548,7 +535,6 @@ async def send_msg(bot, filename, caption):
 
         else:
             genres = "Unknown"
-            ott = ["Not Available"]
             runtime = "Unknown"
             rating = "N/A"
             cert = get_cert_emoji("NR")
@@ -577,7 +563,6 @@ async def send_msg(bot, filename, caption):
         text += f"<code>{cert} | ⏱ {runtime} | ⭐ {rating}</code>\n\n"
         text += f"<blockquote><b>🎙 {language}</b></blockquote>\n"
         text += f"<b>📽 Genre:</b> {genres}\n\n"
-        text += f"<b>📡 OTT:</b> {' • '.join(ott) if ott else 'Not Available'}"
 
         btn_link = f"https://telegram.me/{temp.U_NAME}?start=getfile-{quote(display_name.replace(' ', '-'))}"
         btn = [[InlineKeyboardButton('🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑', url=btn_link)]]
@@ -599,9 +584,5 @@ async def get_qualities(text, qualities: list):
             quality.append(q)
     quality = ", ".join(quality)
     return quality
-
-
-
-
 
 
