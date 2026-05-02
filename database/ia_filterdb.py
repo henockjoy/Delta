@@ -315,6 +315,8 @@ async def get_tmdb_card(query):
             detail = await resp.json()
 
         genres = [g["name"] for g in detail.get("genres", [])]
+        backdrop_path = detail.get("backdrop_path")
+        backdrop = f"https://image.tmdb.org/t/p/original{backdrop_path}" if backdrop_path else None
 
         
 
@@ -381,7 +383,8 @@ async def get_tmdb_card(query):
             "genres": genres,
             "runtime": runtime_str,
             "rating": rating,
-            "certification": certification
+            "certification": certification,
+            "backdrop": backdrop
         }
 
     except Exception as e:
@@ -398,7 +401,7 @@ batch_messages = {}                 # key = series_key → message_id
 # ------------------------------
 # Schedule batched series message
 # ------------------------------
-async def schedule_series_batch(bot, series_key, display_name, language, genres, cert, runtime, rating):
+async def schedule_series_batch(bot, series_key, display_name, language, genres, cert, runtime, rating, backdrop):
     """Send or update combined message for a batch of episodes"""
     await asyncio.sleep(10)  # batch delay
 
@@ -498,16 +501,15 @@ async def send_msg(bot, filename, caption):
         language = language[:-2] if language else "Orginal Audio"
 
         # Clean existing season/episode from name
+        clean_name = re.sub(r"[\(\)\[\]\{\}:;'\-!]", "", filename).strip()
         clean_name = re.sub(r"(?i)\bS\d{1,2}([EVP]\d{1,3})?\b", "", clean_name).strip()
 
         # Build display name
-        if season and episode:
-            display_name = f"{clean_name} S{season}E{episode}"
-        elif season:
+        if is_series:
             display_name = f"{clean_name} S{season}"
         else:
             display_name = clean_name
-
+        unique_key = display_name
         if not await add_name(OWNERID, unique_key):
             return  # skip duplicates
 
@@ -517,7 +519,8 @@ async def send_msg(bot, filename, caption):
             text = re.sub(r"[.\-_]", " ", text)
             text = re.sub(r"\s+", " ", text).strip()
             return text
-        clean_name = re.sub(r"\bS\d{1,2}E\d{1,3}\b", "", clean_name)
+        clean_name = re.sub(r"[\(\)\[\]\{\}:;'\-!]", "", filename)
+        clean_name = re.sub(r"(?i)\bS\d{1,2}([EVP]\d{1,3})?\b", "", clean_name)
         clean_name = re.sub(r"\b(WEB-DL|WEBRip|HDRip|BluRay|AAC|x264|H264|DDP5\.1)\b", "", clean_name, flags=re.I)
         clean_name = re.sub(r"\b(19|20)\d{2}\b", "", clean_name)
         clean_name = re.sub(r"[.\-_]", " ", clean_name)
@@ -526,7 +529,7 @@ async def send_msg(bot, filename, caption):
 
         if tmdb:
             genres = ", ".join(tmdb.get("genres", [])) or "Unknown"
-
+            backdrop = tmdb.get("backdrop")
             runtime = tmdb.get("runtime", "Unknown")
             rating = tmdb.get("rating", "N/A")
 
@@ -535,25 +538,33 @@ async def send_msg(bot, filename, caption):
 
         else:
             genres = "Unknown"
+            backdrop = None
             runtime = "Unknown"
             rating = "N/A"
             cert = get_cert_emoji("NR")
 
-        # ------------------------------
-        # Series batching
-        # ------------------------------
         if is_series:
-            season_num = season.zfill(2) if season else "01"
-            series_key = f"{clean_name} S{season_num}"
-            if episode and episode.isdigit():
-                episode_batch[series_key].append(f"E{episode}")
+            text = f"<b>✅{display_name} {tag}</b>\n"
+            text += f"<code>{cert} | ⏱ {runtime} | ⭐ {rating}</code>\n\n"
+            text += f"<blockquote><b>🎙 {language}</b></blockquote>\n"
+            text += f"<b>📽 Genre:</b> {genres}\n\n"
 
-            # Start or restart batching task
-            if series_key in batch_tasks:
-                batch_tasks[series_key].cancel()
-            batch_tasks[series_key] = asyncio.create_task(
-                schedule_series_batch(bot, series_key, display_name, language, genres, cert, runtime, rating)
-            )
+            btn_link = f"https://telegram.me/{temp.U_NAME}?start=getfile-{quote(display_name.replace(' ', '-'))}"
+            btn = [[InlineKeyboardButton('🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑', url=btn_link)]]
+
+            if backdrop and backdrop.startswith("https://image.tmdb.org"):
+                await bot.send_photo(
+                    chat_id=MOVIE_UPDATE_CHANNEL,
+                    photo=backdrop,
+                    caption=text,
+                    reply_markup=InlineKeyboardMarkup(btn)
+                )
+            else:
+                await bot.send_message(
+                    chat_id=MOVIE_UPDATE_CHANNEL,
+                    text=text,
+                    reply_markup=InlineKeyboardMarkup(btn)
+                )
             return
 
         # ------------------------------
@@ -567,11 +578,19 @@ async def send_msg(bot, filename, caption):
         btn_link = f"https://telegram.me/{temp.U_NAME}?start=getfile-{quote(display_name.replace(' ', '-'))}"
         btn = [[InlineKeyboardButton('🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑', url=btn_link)]]
 
-        await bot.send_message(
-            chat_id=MOVIE_UPDATE_CHANNEL,
-            text=text,
-            reply_markup=InlineKeyboardMarkup(btn)
-        )
+        if backdrop and backdrop.startswith("https://image.tmdb.org"):
+            await bot.send_photo(
+                chat_id=MOVIE_UPDATE_CHANNEL,
+                photo=backdrop,
+                caption=text,
+                reply_markup=InlineKeyboardMarkup(btn)
+            )
+        else:
+            await bot.send_message(
+                chat_id=MOVIE_UPDATE_CHANNEL,
+                text=text,
+                reply_markup=InlineKeyboardMarkup(btn)
+            )
 
     except Exception as e:
         logging.error(f"send_msg error: {e}")
@@ -584,5 +603,9 @@ async def get_qualities(text, qualities: list):
             quality.append(q)
     quality = ", ".join(quality)
     return quality
+
+
+
+
 
 
