@@ -63,7 +63,7 @@ textblob
 langdetect 
 
 # Git-based Packages
-git+https://github.com/Joelkb/cinemagoer
+git+https://github.com/cinemagoer/cinemagoer
 
 # Other Tools
 apscheduler
