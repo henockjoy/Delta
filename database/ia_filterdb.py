@@ -457,74 +457,109 @@ async def send_msg(bot, filename, caption):
         caption = re.sub(r'\(\@\S+\)|\[\@\S+\]|\b@\S+|\bwww\.\S+', '', caption or '').strip()
 
         # ------------------------------
-        # Detect season & episode (IMPROVED)
+        # Detect season & episode
         # ------------------------------
         season, episode = None, None
 
-        # Detect SxxExx / SxxVxx
-        se_ep_match = re.search(r"(?i)S(\d{1,2})\s*[-._ ]?\s*(?:E|EP|V)(\d{1,3})", filename) \
-            or re.search(r"(?i)S(\d{1,2})\s*[-._ ]?\s*(?:E|EP|V)(\d{1,3})", caption)
+        se_ep_match = re.search(
+            r"(?i)S(\d{1,2})\s*[-._ ]?\s*(?:E|EP|V)(\d{1,3})",
+            filename
+        ) or re.search(
+            r"(?i)S(\d{1,2})\s*[-._ ]?\s*(?:E|EP|V)(\d{1,3})",
+            caption
+        )
 
         if se_ep_match:
             season, episode = se_ep_match.group(1), se_ep_match.group(2)
 
-        # Detect only Season (S01)
-        season_only_match = re.search(r"(?i)\bS(\d{1,2})\b", filename) \
-            or re.search(r"(?i)\bS(\d{1,2})\b", caption)
+        season_only_match = re.search(
+            r"(?i)\bS(\d{1,2})\b",
+            filename
+        ) or re.search(
+            r"(?i)\bS(\d{1,2})\b",
+            caption
+        )
 
         if not season and season_only_match:
             season = season_only_match.group(1)
 
-        # Normalize
         if season:
             season = season.zfill(2)
+
         if episode:
             episode = episode.zfill(2)
 
-        # FINAL DECISION
         is_series = True if season else False
         tag = "#𝖳𝖵𝖲𝖤𝖱𝖨𝖤𝖲" if is_series else "#𝖬𝖮𝖵𝖨𝖤"
 
+        # ------------------------------
         # Trim filename
+        # ------------------------------
         year_match = re.search(r"\b(19|20)\d{2}\b", caption)
         year = year_match.group(0) if year_match else None
+
         if year:
             filename = filename[: filename.find(year) + 4]
         elif season and season in filename:
             filename = filename[: filename.find(season) + len(season)]
 
-        # Language detection (unchanged)
+        # ------------------------------
+        # Language detection
+        # ------------------------------
         language = ""
+
         for lang in CAPTION_LANGUAGES:
             if lang.lower() in caption.lower():
                 language += f"{lang}, "
+
         language = language[:-2] if language else "Orginal Audio"
 
-        # Clean existing season/episode from name
+        # ------------------------------
+        # Clean names
+        # ------------------------------
         clean_name = re.sub(r"[\(\)\[\]\{\}:;'\-!]", "", filename).strip()
-        clean_name = re.sub(r"(?i)\bS\d{1,2}([EVP]\d{1,3})?\b", "", clean_name).strip()
 
-        # Build display name
+        clean_name = re.sub(
+            r"(?i)\bS\d{1,2}([EVP]\d{1,3})?\b",
+            "",
+            clean_name
+        ).strip()
+
         if is_series:
             display_name = f"{clean_name} S{season}"
         else:
             display_name = clean_name
-        unique_key = display_name
-        if not await add_name(OWNERID, unique_key):
-            return  # skip duplicates
 
-        # Fetch genres (unchanged)
-        def clean_query(text):
-            text = re.sub(r"\b(19|20)\d{2}\b", "", text)
-            text = re.sub(r"[.\-_]", " ", text)
-            text = re.sub(r"\s+", " ", text).strip()
-            return text
+        unique_key = display_name
+
+        if not await add_name(OWNERID, unique_key):
+            return
+
+        # ------------------------------
+        # TMDB CLEAN QUERY
+        # ------------------------------
         clean_name = re.sub(r"[\(\)\[\]\{\}:;'\-!]", "", filename)
-        clean_name = re.sub(r"(?i)\bS\d{1,2}([EVP]\d{1,3})?\b", "", clean_name)
-        clean_name = re.sub(r"\b(WEB-DL|WEBRip|HDRip|BluRay|AAC|x264|H264|DDP5\.1)\b", "", clean_name, flags=re.I)
+
+        clean_name = re.sub(
+            r"(?i)\bS\d{1,2}([EVP]\d{1,3})?\b",
+            "",
+            clean_name
+        )
+
+        clean_name = re.sub(
+            r"\b(WEB-DL|WEBRip|HDRip|BluRay|AAC|x264|H264|DDP5\.1)\b",
+            "",
+            clean_name,
+            flags=re.I
+        )
+
         clean_name = re.sub(r"\b(19|20)\d{2}\b", "", clean_name)
         clean_name = re.sub(r"[.\-_]", " ", clean_name)
         clean_name = re.sub(r"\s+", " ", clean_name).strip()
+
+        # ------------------------------
+        # TMDB DATA
+        # ------------------------------
         tmdb = await get_tmdb_card(clean_name)
 
         if tmdb:
@@ -543,49 +578,128 @@ async def send_msg(bot, filename, caption):
             rating = "N/A"
             cert = get_cert_emoji("NR")
 
-        if is_series:
-            text = f"<b>✅{display_name} {tag}</b>\n"
-            text += f"<code>{cert} | ⏱ {runtime} | ⭐ {rating}</code>\n\n"
-            text += f"<blockquote><b>🎙 {language}</b></blockquote>\n"
-            text += f"<b>📽 Genre:</b> {genres}\n\n"
-
-            btn_link = f"https://telegram.me/{temp.U_NAME}?start=getfile-{quote(display_name.replace(' ', '-'))}"
-            btn = [[InlineKeyboardButton('🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑', url=btn_link)]]
-
-            if backdrop and backdrop.startswith("https://image.tmdb.org"):
-                await bot.send_photo(
-                    chat_id=MOVIE_UPDATE_CHANNEL,
-                    photo=backdrop,
-                    caption=text,
-                    reply_markup=InlineKeyboardMarkup(btn)
-                )
-            else:
-                await bot.send_message(
-                    chat_id=MOVIE_UPDATE_CHANNEL,
-                    text=text,
-                    reply_markup=InlineKeyboardMarkup(btn)
-                )
-            return
-
         # ------------------------------
-        # Movie message
+        # MESSAGE TEXT
         # ------------------------------
         text = f"<b>✅{display_name} {tag}</b>\n"
         text += f"<code>{cert} | ⏱ {runtime} | ⭐ {rating}</code>\n\n"
         text += f"<blockquote><b>🎙 {language}</b></blockquote>\n"
         text += f"<b>📽 Genre:</b> {genres}\n\n"
 
-        btn_link = f"https://telegram.me/{temp.U_NAME}?start=getfile-{quote(display_name.replace(' ', '-'))}"
-        btn = [[InlineKeyboardButton('🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑', url=btn_link)]]
+        # ------------------------------
+        # SEARCH BUTTON
+        # ------------------------------
+        btn_link = (
+            f"https://telegram.me/{temp.U_NAME}"
+            f"?start=getfile-{quote(display_name.replace(' ', '-'))}"
+        )
 
+        btn = [
+            [
+                InlineKeyboardButton(
+                    '🔍 𝙲𝚕𝚒𝚌𝚔 𝚝𝚘 𝚂𝚎𝚊𝚛𝚌𝚑',
+                    url=btn_link
+                )
+            ]
+        ]
+
+        # ------------------------------
+        # VIDKING SMART PLAYER
+        # ------------------------------
+        try:
+            vidking_url = None
+
+            search_query = clean_name.strip()
+
+            search_url = f"{TMDB_BASE}/search/multi"
+
+            async with aiohttp_session.get(
+                search_url,
+                params={
+                    "api_key": TMDB_API_KEY,
+                    "query": search_query
+                },
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+
+                search_data = await resp.json()
+
+            results = search_data.get("results", [])
+
+            if results:
+
+                def best_match(results, query):
+                    best = None
+                    best_score = 0
+
+                    for r in results:
+                        title = r.get("title") or r.get("name") or ""
+
+                        score = fuzz.token_sort_ratio(
+                            query.lower(),
+                            title.lower()
+                        )
+
+                        if score > best_score:
+                            best = r
+                            best_score = score
+
+                    return best or results[0]
+
+                item = best_match(results, search_query)
+
+                tmdb_id = item.get("id")
+
+                if tmdb_id:
+
+                    # TV Series
+                    if is_series:
+
+                        season_num = int(season) if season else 1
+                        ep_num = int(episode) if episode else 1
+
+                        vidking_url = (
+                            f"https://www.vidking.net/embed/tv/"
+                            f"{tmdb_id}/{season_num}/{ep_num}"
+                            f"?episodeSelector=true"
+                        )
+
+                    # Movie
+                    else:
+
+                        vidking_url = (
+                            f"https://www.vidking.net/embed/movie/{tmdb_id}"
+                        )
+
+            # Add button
+            if vidking_url:
+
+                btn.append(
+                    [
+                        InlineKeyboardButton(
+                            "🌐 Smart Player 🌐",
+                            url=vidking_url
+                        )
+                    ]
+                )
+
+        except Exception as e:
+            logger.error(f"VidKing player error: {e}")
+
+        # ------------------------------
+        # SEND MESSAGE
+        # ------------------------------
         if backdrop and backdrop.startswith("https://image.tmdb.org"):
+
             await bot.send_photo(
                 chat_id=MOVIE_UPDATE_CHANNEL,
                 photo=backdrop,
                 caption=text,
                 reply_markup=InlineKeyboardMarkup(btn)
             )
+
         else:
+
             await bot.send_message(
                 chat_id=MOVIE_UPDATE_CHANNEL,
                 text=text,
