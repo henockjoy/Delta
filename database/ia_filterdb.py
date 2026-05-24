@@ -47,15 +47,9 @@ class Media(Document):
     caption = fields.StrField(allow_none=True)
 
     class Meta:
+        indexes = ('$file_name', )
         collection_name = COLLECTION_NAME
-        indexes = [
-            {
-                "key": [("file_name", "text")],
-                "name": "file_name_text"
-            },
-            [("caption", 1)]
-        ]
-
+        
 async def choose_mediaDB():
     """Always use Media as the database."""
     global saveMedia
