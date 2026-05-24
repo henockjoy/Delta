@@ -50,9 +50,10 @@ class Media(Document):
         collection_name = COLLECTION_NAME
         indexes = [
             {
-                "key": [("file_name", "text"), ("caption", "text")],
-                "name": "file_name_caption_text"
-            }
+                "key": [("file_name", "text")],
+                "name": "file_name_text"
+            },
+            [("caption", 1)]
         ]
 
 async def choose_mediaDB():
