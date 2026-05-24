@@ -72,7 +72,10 @@ async def Lucy_start():
         b_users, b_chats = await db.get_banned()
         temp.BANNED_USERS = b_users
         temp.BANNED_CHATS = b_chats
-        await Media.ensure_indexes()
+        try:
+            await Media.ensure_indexes()
+        except Exception as e:
+            print("Index warning ignored:", e)
         stats = await clientDB.command('dbStats')
         free_dbSize = round(512-((stats['dataSize']/(1024*1024))+(stats['indexSize']/(1024*1024))), 2)
         logging.info(f"Since primary DB have enough space ({free_dbSize}MB) left, It will be used for storing datas.")
