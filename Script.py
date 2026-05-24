@@ -264,7 +264,7 @@ Nᴀᴍᴇ : {}
 
 Mᴇꜱꜱᴀɢᴇ : <b>{}</b>"""
     
-    CAPTION = """<blockquote><b>{file_name}</b>\n\n<code>{file_caption}</code></blockquote>\n<i>ᴘʟᴇᴀsᴇ ꜰᴏʀᴡᴀʀᴅ ᴛʜɪs ꜰɪʟᴇs ᴛᴏ ᴛʜᴇ sᴀᴠᴇᴅ ᴍᴇssᴀɢᴇ</i>"""
+    CAPTION = """<blockquote><b>{file_name}</b>\n\n<code>{caption}</code></blockquote>\n<i>ᴘʟᴇᴀsᴇ ꜰᴏʀᴡᴀʀᴅ ᴛʜɪs ꜰɪʟᴇs ᴛᴏ ᴛʜᴇ sᴀᴠᴇᴅ ᴍᴇssᴀɢᴇ</i>"""
 
     IMDB_TEMPLATE_TXT = """<u><b>{title}</b></u>
     
